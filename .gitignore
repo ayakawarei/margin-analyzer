@@ -1,0 +1,34 @@
+# Generated market-data caches and Python bytecode
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environments and dependencies
+.venv/
+venv/
+node_modules/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+*cookie*.txt
+*cookie*.json
+
+# Logs, temporary files, editor and OS metadata
+*.log
+*.tmp
+*.bak
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Previous UI backup (keep locally, exclude from releases)
+index_v3_backup.html

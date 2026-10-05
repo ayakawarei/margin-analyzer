@@ -1,0 +1,1523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日股信用残分析面板</title>
+<style>
+  :root{
+    --bg:#0f1420; --card:#171e2c; --card2:#1d2536; --line:#2a3448;
+    --txt:#e8ecf4; --sub:#8b96ad; --buy:#4a7dff; --sell:#ff5a6e; --ratio:#b06cff;
+    --ok:#22c55e; --warn:#f5a524;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);
+    font-family:-apple-system,"Hiragino Sans","Noto Sans JP","PingFang SC",sans-serif;
+    padding:14px;font-size:13px;line-height:1.6}
+
+  /* 顶栏 */
+  .top{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;
+    flex-wrap:wrap;margin-bottom:14px}
+  .brand{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .brand h1{font-size:22px;font-weight:700;letter-spacing:.5px}
+  .brand .period{font-size:12px;color:var(--sub)}
+  .brand .code{font-size:14px;color:var(--buy);font-weight:600}
+
+  .search{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+  @media(max-width:640px){
+    .top{gap:10px}
+    .search{width:100%;gap:6px}
+    /* 注意：下面 .search input{width:104px} 是后置规则，会覆盖此处，
+       故这里用 !important 保证输入框能自适应伸展 */
+    .search input{flex:1;min-width:88px;width:auto !important}
+    .search select{order:5;flex:1;min-width:0}
+    button{padding:8px 12px}
+    /* 3 个 KPI 保持横排，只压小字号 —— 竖排会把第 3 卡推到 Tab 栏下面 */
+    .kpis{gap:7px}
+    .kpi{padding:7px 8px}
+    .kpi .k{font-size:10px;margin-bottom:1px;line-height:1.25}
+    .kpi .v{font-size:16px}
+    .kpi .lv{font-size:10px;margin-top:1px}
+    .kpi .s{font-size:9.5px}
+    .facts{gap:7px}
+    .hero{padding:12px 14px;gap:12px}
+  }
+  .search input{width:104px;padding:8px 10px;border-radius:8px;
+    border:1px solid var(--line);background:var(--card);color:var(--txt);font-size:14px}
+  .search input:focus{outline:none;border-color:var(--buy)}
+  .search select{padding:8px 9px;border-radius:8px;border:1px solid var(--line);
+    background:var(--card2);color:var(--txt);cursor:pointer;font-size:12.5px}
+  button{padding:8px 15px;border-radius:8px;border:1px solid var(--line);
+    background:var(--card2);color:var(--txt);cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--buy)}
+  button.primary{background:var(--buy);border-color:var(--buy);color:#fff;font-weight:600}
+  .pageind{font-size:15px;color:var(--sub);font-weight:600;letter-spacing:2px;padding-top:6px}
+
+  /* 网格 */
+  .grid{display:grid;grid-template-columns:1fr 360px;gap:10px;align-items:start}
+  @media(max-width:1080px){.grid{grid-template-columns:1fr}}
+  .col{display:flex;flex-direction:column;gap:10px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .card h3{font-size:12.5px;font-weight:600;color:var(--txt);margin-bottom:7px;
+    display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+  .card h3 small{color:var(--sub);font-weight:400;font-size:10.5px}
+
+  .chart{width:100%;height:240px}
+  .chart.sm{height:185px}
+
+  /* 倍率大数 */
+  .bignum{text-align:center;padding:4px 0 2px}
+  .bignum .v{font-size:40px;font-weight:700;color:var(--ratio);line-height:1.1}
+  .bignum .u{font-size:15px;color:var(--ratio);font-weight:600}
+  .bignum .d{font-size:11px;color:var(--sub);margin-top:2px}
+
+  .range{margin-top:10px}
+  .range .bar{height:7px;border-radius:4px;position:relative;
+    background:linear-gradient(90deg,var(--ratio),#ff5a6e,#4a7dff)}
+  .range .dot{position:absolute;top:-3px;width:3px;height:13px;background:#fff;border-radius:2px}
+  .range .lb{display:flex;justify-content:space-between;font-size:10.5px;color:var(--sub);margin-top:5px}
+
+  /* 信用残卡片 */
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .mini{background:var(--card2);border-radius:8px;padding:9px 11px}
+  .mini .k{font-size:11px;color:var(--sub)}
+  .mini .v{font-size:19px;font-weight:700;margin-top:1px}
+  .mini .v small{font-size:11px;font-weight:400;color:var(--sub)}
+  .mini .c{font-size:11px;font-weight:600}
+  .up{color:var(--sell)} .down{color:var(--buy)} /* 日股：涨红跌绿 */
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+  th{color:var(--sub);font-weight:500;font-size:11px;padding:5px 6px;text-align:right;
+    border-bottom:1px solid var(--line)}
+  td{padding:4.5px 6px;text-align:right;border-bottom:1px solid rgba(42,52,72,.45)}
+  th:first-child,td:first-child{text-align:left}
+  tbody tr:hover{background:rgba(74,125,255,.07)}
+
+  /* 指标条 */
+  .metric{display:flex;justify-content:space-between;align-items:center;padding:4px 0}
+  .metric .k{font-size:12px;color:var(--sub)}
+  .metric .v{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+
+  .band{margin:8px 0}
+  .band .ticks{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-bottom:3px}
+  .band .ticks b{font-weight:600;color:var(--txt)}
+  .band .track{height:6px;border-radius:3px;background:var(--card2);position:relative}
+  .band .rng{position:absolute;height:6px;border-radius:3px;
+    background:linear-gradient(90deg,var(--buy),var(--ratio))}
+  .band .cur{position:absolute;top:-3px;width:3px;height:12px;background:#fff;border-radius:2px}
+
+  .note{font-size:10.5px;color:var(--sub);margin-top:7px;line-height:1.5}
+
+  /* 状态 */
+  .status{padding:5px 10px;border-radius:6px;font-size:11px;margin-bottom:10px;
+    display:flex;align-items:center;gap:6px}
+  .status.info{background:rgba(74,125,255,.1);border:1px solid rgba(74,125,255,.3)}
+  .status.err{background:rgba(255,90,110,.1);border:1px solid rgba(255,90,110,.35);color:#ffb3bc}
+  .status.ok{background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.18);color:#6ee7a0}
+  .status.warn{background:rgba(245,165,36,.1);border:1px solid rgba(245,165,36,.32);color:#fcd34d}
+
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);
+    border-top-color:var(--buy);border-radius:50%;animation:sp .7s linear infinite;
+    vertical-align:-1px;margin-right:5px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  .foot{font-size:10.5px;color:var(--sub);margin-top:14px;padding-top:10px;
+    border-top:1px solid var(--line);line-height:1.6}
+  .hide{display:none!important}
+  .empty{color:var(--sub);font-size:12px;padding:18px 0;text-align:center}
+
+  /* ===== 7类指标 ===== */
+  .indwrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:8px}
+  .ind{background:var(--card2);border-radius:8px;padding:8px 10px;
+    display:flex;flex-direction:column;gap:3px;min-height:66px}
+  .ind .k{font-size:10.5px;color:var(--sub);display:flex;align-items:center;gap:4px}
+  .ind .k i{font-style:normal;font-size:9px;background:rgba(74,125,255,.18);
+    color:#8ab0ff;border-radius:3px;padding:0 4px;line-height:1.5}
+  .ind .v{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.2}
+  .ind .v small{font-size:10.5px;font-weight:400;color:var(--sub)}
+  .ind .d{font-size:10px;color:var(--sub);line-height:1.45}
+  .ind .d b{font-variant-numeric:tabular-nums}
+  .ind .d.na{color:#6b7488;font-style:italic}
+
+  /* 迷你条 */
+  .ibar{height:4px;border-radius:2px;background:rgba(42,52,72,.8);position:relative;margin-top:2px}
+  .ibar i{position:absolute;left:0;top:0;height:4px;border-radius:2px;display:block}
+
+  /* ===== 异常警告 ===== */
+  .anom{border-left:3px solid;padding:6px 9px;border-radius:0 6px 6px 0;
+    margin-bottom:6px;background:var(--card2);font-size:11.5px;line-height:1.55}
+  .anom:last-child{margin-bottom:0}
+  .anom .t{font-weight:600;font-size:12px;margin-bottom:1px}
+  .anom .d{color:var(--sub)}
+  .anom.warn{border-color:var(--warn)}  .anom.warn .t{color:#fcd34d}
+  .anom.info{border-color:var(--buy)}   .anom.info .t{color:#8ab0ff}
+  .anom.err{border-color:var(--sell)}   .anom.err .t{color:#ff9aa6}
+
+  /* ===== 结论 ===== */
+  .vwrap{display:grid;grid-template-columns:150px 1fr;gap:14px;align-items:start}
+  @media(max-width:640px){.vwrap{grid-template-columns:1fr}}
+  .vscore{text-align:center;background:var(--card2);border-radius:10px;padding:12px 8px}
+  .vscore .z{font-size:16px;font-weight:700;margin-bottom:2px}
+  .vscore .n{font-size:30px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+  .vscore .u{font-size:11px;color:var(--sub)}
+  .gauge{height:8px;border-radius:4px;margin-top:8px;position:relative;
+    background:linear-gradient(90deg,#ff5a6e,#f5a524 50%,#22c55e)}
+  .gauge .m{position:absolute;top:-3px;width:3px;height:14px;background:#fff;border-radius:2px;
+    box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+  .gauge .mid{position:absolute;left:50%;top:-1px;width:1px;height:10px;background:rgba(255,255,255,.35)}
+  .vwhy{display:flex;flex-direction:column;gap:4px}
+  .vwhy .r{font-size:11.5px;line-height:1.55;padding:4px 8px;border-radius:5px;
+    background:var(--card2);border-left:2.5px solid}
+  .vwhy .r.buy{border-color:var(--ok)}
+  .vwhy .r.alert{border-color:var(--warn)}
+  .vwhy .r.sell{border-color:var(--sell)}
+  .vwhy .r b{font-weight:600}
+  .vwhy .r span{color:var(--sub)}
+  .vfoot{font-size:10.5px;color:var(--sub);margin-top:9px;line-height:1.6;
+    padding-top:8px;border-top:1px solid var(--line)}
+
+  /* ===== v3 双分数（方向 / 风险） ===== */
+  .v3{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+  @media(max-width:700px){.v3{grid-template-columns:1fr}}
+  .vbox{background:var(--card2);border-radius:9px;padding:10px 12px}
+  .vbox .hd{font-size:11px;color:var(--sub);display:flex;justify-content:space-between;
+    align-items:baseline;margin-bottom:5px}
+  .vbox .hd b{font-size:12.5px;color:var(--txt);font-weight:600}
+  .vbox .big{font-size:28px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
+  .vbox .sc{font-size:10.5px;color:var(--sub);margin-left:5px}
+  .vbox .g{height:7px;border-radius:4px;margin-top:6px;position:relative;background:var(--line)}
+  .vbox .g i{position:absolute;top:-2px;height:11px;width:3px;border-radius:2px;background:#fff;
+    box-shadow:0 0 0 1px rgba(0,0,0,.35)}
+  .vbox .sc2{font-size:10px;color:var(--sub);margin-top:5px;line-height:1.5}
+  .vbox.dirmid .g{background:linear-gradient(90deg,#ff5a6e 0%,#8b96ad 50%,#22c55e 100%)}
+  .vbox.risk .g{background:linear-gradient(90deg,#22c55e,#f5a524 60%,#ff5a6e)}
+  .vbox.risk .g{background:linear-gradient(90deg,#22c55e,#f5a524 60%,#ff5a6e)}
+
+  /* 四象限 */
+  .quad{margin-top:10px;border-radius:8px;padding:9px 11px;background:var(--card2);
+    border-left:3px solid}
+  .quad .t{font-size:13.5px;font-weight:700;margin-bottom:3px}
+  .quad .n{font-size:11.5px;color:var(--txt);margin-bottom:2px;font-variant-numeric:tabular-nums}
+  .quad .d{font-size:11px;color:var(--sub);line-height:1.55}
+
+  /* 估值来源标注 */
+  .mbtn{padding:3px 9px;font-size:10.5px;border-radius:6px;border:1px solid var(--line);
+    background:var(--card2);color:var(--sub);cursor:pointer}
+  .mbtn.on{background:var(--buy);border-color:var(--buy);color:#fff;font-weight:600}
+
+  /* ================================================================
+     Summary-first 布局
+     ================================================================ */
+  body{padding-bottom:64px}   /* 给底部 Tab 留位 */
+
+  /* ---- Hero Summary ---- */
+  .hero{display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:center;
+    background:linear-gradient(135deg,var(--card) 0%,var(--card2) 100%);
+    border:1px solid var(--line);border-radius:12px;padding:14px 18px;margin-bottom:10px}
+  @media(max-width:640px){.hero{grid-template-columns:1fr;gap:12px;padding:14px}}
+  .heroL{text-align:center;padding-right:18px;border-right:1px solid var(--line)}
+  @media(max-width:640px){.heroL{border-right:none;border-bottom:1px solid var(--line);
+    padding-right:0;padding-bottom:10px}}
+  .heroPx .px{font-size:32px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+  .heroPx .pxu{font-size:15px;font-weight:600;color:var(--sub);margin-left:2px}
+  .heroPx .pxc{display:block;font-size:13px;font-weight:600;margin-top:2px}
+  .heroLbl{font-size:11px;color:var(--sub);margin-top:2px}
+
+  .heroBadge{display:inline-block;font-size:19px;font-weight:700;padding:6px 14px;
+    border-radius:9px;margin-bottom:6px;line-height:1.35}
+  .heroWhy{font-size:13px;line-height:1.65;color:var(--txt)}
+  .heroWhy .q{color:var(--sub)}
+
+  /* ---- 方向 / 残量 两行事实 ---- */
+  .facts{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+  @media(max-width:640px){.facts{grid-template-columns:1fr}}
+  .fact{background:var(--card);border:1px solid var(--line);border-radius:9px;
+    padding:9px 13px;display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+  .fact .fl{font-size:11.5px;color:var(--sub)}
+  .fl .frange{font-size:9.5px;color:var(--sub);opacity:.75;font-weight:400}
+  .fact .fv{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+  .fact .fa{font-size:11.5px;font-weight:600;margin-left:auto}
+
+  /* ---- 四象限（首页） ---- */
+  .quad{background:var(--card);border:1px solid var(--line);border-left:3px solid;
+    border-radius:0 9px 9px 0;padding:10px 14px;margin-bottom:12px}
+  .quad .t{font-size:15px;font-weight:700;margin-bottom:3px}
+  .quad .n{font-size:12.5px;font-variant-numeric:tabular-nums;margin-bottom:3px}
+  .quad .d{font-size:12px;color:var(--sub);line-height:1.6}
+
+  /* ---- 3 个核心 KPI ---- */
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px;
+    align-items:start}
+  /* 移动端保持 3 列横排：竖排会把第 3 张卡推到固定 Tab 栏下方 */
+  @media(max-width:400px){.kpis{gap:5px}}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:9px 12px}
+  .kpi .k{font-size:11.5px;color:var(--sub);margin-bottom:3px}
+  .kpi .v{font-size:20px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
+  .kpi .v small{font-size:12px;font-weight:400;color:var(--sub);margin-left:2px}
+  .kpi .lv{font-size:11.5px;font-weight:600;margin-top:2px}
+  .kpi .sub{font-size:10.5px;color:var(--sub);margin-top:2px;line-height:1.45}
+
+  /* ---- 变化率读数 ---- */
+  .delta{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:7px}
+  @media(max-width:640px){.delta{grid-template-columns:1fr}}
+  .dcell{background:var(--card2);border-radius:7px;padding:7px 11px;
+    display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+  .dcell .dl{font-size:11.5px;color:var(--sub)}
+  .dcell .dv{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
+  .dcell .da{font-size:14px;font-weight:700}
+  .deltaNote{grid-column:1/-1;font-size:12px;line-height:1.6;padding:5px 2px 0}
+  .deltaNote.逆{color:var(--sell);font-weight:600}
+
+  /* ---- 注目 ---- */
+  .watch{background:rgba(74,125,255,.07);border:1px solid rgba(74,125,255,.28);
+    border-radius:9px;padding:11px 14px;margin-top:12px}
+  .watchT{font-size:12px;font-weight:700;margin-bottom:4px;color:#8ab0ff}
+  .watchB{font-size:12.5px;line-height:1.7}
+  .watchB li{margin-left:16px;margin-bottom:2px}
+
+  /* ---- 底部 Tab ---- */
+  @media(max-width:640px){ .wide-only{display:none} }
+  .tabs{position:fixed;left:0;right:0;bottom:0;z-index:50;display:flex;
+    background:rgba(15,20,32,.96);backdrop-filter:blur(8px);
+    border-top:1px solid var(--line)}
+  .tab{flex:1;padding:11px 6px;background:none;border:none;color:var(--sub);
+    font-size:12.5px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent}
+  .tab.on{color:var(--txt);border-bottom-color:var(--buy)}
+  .tabpane.hide{display:none}
+
+  /* ---- 键值表（详细页） ---- */
+  .kv{display:flex;flex-direction:column;gap:5px;font-size:12.5px}
+  .krow{display:flex;justify-content:space-between;gap:12px;align-items:baseline;
+    padding:4px 0;border-bottom:1px solid rgba(42,52,72,.4)}
+  .krow:last-child{border-bottom:none}
+  .krow span{color:var(--sub)}
+  .krow b{font-weight:600;font-variant-numeric:tabular-nums;text-align:right}
+  .krow.warn b{color:var(--warn)}
+  .krow.err b{color:var(--sell)}
+
+  .formula{font-size:12.5px;line-height:1.9;color:var(--txt)}
+  .formula b{color:var(--buy)}
+  .formula .na{color:var(--sub);font-size:11px}
+
+  .srcnote-slot:empty{display:none}
+
+  .srcnote{font-size:10px;color:var(--sub);margin-top:6px;line-height:1.55;
+    background:rgba(245,165,36,.07);border-left:2px solid var(--warn);
+    padding:5px 8px;border-radius:0 4px 4px 0}
+  .srcnote b{color:var(--warn)}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="brand">
+    <div>
+      <div class="period">信用需給分析</div>
+      <h1><span id="name">—</span> <span class="code" id="codeLbl"></span></h1>
+    </div>
+  </div>
+  <div class="search">
+    <input id="inp" value="7974" placeholder="股票代码" maxlength="5" autocomplete="off"
+           autocapitalize="characters" spellcheck="false">
+    <button class="primary" onclick="run()">分析</button>
+    <button onclick="run(true)" title="清除缓存并重新扫描 JPX 索引页" class="wide-only">刷新</button>
+    <select id="srcSel" onchange="setSource(this.value)" title="信用残数据源">
+      <option value="auto">信用残：自动</option>
+      <option value="official">信用残：JPX 官方日次</option>
+      <option value="ganan">信用残：Ganan 周次</option>
+    </select>
+  </div>
+</div>
+
+<div id="status"></div>
+
+<!-- ================================================================
+     概要（默认 Tab）—— 只回答 4 个问题
+     ① 信用需給好还是坏？ ② 为什么？ ③ 买残重不重？ ④ 观察什么？
+     ================================================================ -->
+<div class="tabpane" id="tab0">
+
+  <!-- Hero Summary -->
+  <div class="hero" id="hero">
+    <div class="heroL">
+      <div class="heroPx">
+        <span class="px" id="hPx">—</span><span class="pxu"> 円</span>
+        <span class="pxc" id="hPxChg">—</span>
+      </div>
+      <div class="heroLbl" id="hPxLbl">現在株価</div>
+    </div>
+    <div class="heroR">
+      <div class="heroBadge" id="hBadge">読み込み中…</div>
+      <div class="heroWhy" id="hWhy"></div>
+    </div>
+  </div>
+
+  <!-- 方向 vs 残量（Hero 下的两行事实） -->
+  <div class="facts" id="hFacts"></div>
+
+  <!-- 3 个核心指标（禁止更多） -->
+  <div class="kpis" id="hKpis">
+    <div class="kpi"><div class="k">読み込み中</div><div class="v">—</div></div>
+  </div>
+
+  <!-- 図表：株価 × 信用買残（默认变化率） -->
+  <div class="card">
+    <h3>株価 × 信用買残
+      <span style="display:inline-flex;gap:4px;margin-left:auto">
+        <button id="mIdx" class="mbtn on" onclick="setPMode('idx')">変化率（初日=100）</button>
+        <button id="mAbs" class="mbtn" onclick="setPMode('abs')">実数</button>
+      </span>
+    </h3>
+    <div id="c4" class="chart" style="height:190px"></div>
+    <div class="delta" id="c4delta"></div>
+  </div>
+
+  <!-- 注目 -->
+  <div class="watch" id="hWatch" style="display:none">
+    <div class="watchT">👀 注目</div>
+    <div class="watchB" id="hWatchB"></div>
+  </div>
+</div>
+
+<!-- ================================================================
+     Tab 2：信用残詳細
+     ================================================================ -->
+<div class="tabpane hide" id="tab1">
+
+  <div class="card">
+    <h3>信用買残・売残与信用倍率<small id="rangeTitle" style="font-weight:400"></small></h3>
+    <div id="c1" class="chart"></div>
+  </div>
+
+  <div class="card">
+    <h3>直近の日次データ<small id="tSub" style="font-weight:400"></small></h3>
+    <table>
+      <thead><tr><th>日付</th><th>売残</th><th>買残</th><th>倍率</th></tr></thead>
+      <tbody id="tbody"><tr><td colspan="4" class="empty">等待数据…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>信用需給核心指标<small>倍率・消化日数・上場比・残量変化・股价×买残四象限</small></h3>
+    <div id="indBox"><div class="empty">等待数据…</div></div>
+    <div id="quadBox"></div>
+  </div>
+
+  <!-- 评分内部贡献（首页已隐藏） -->
+  <div class="card" id="verdictCard">
+    <h3>评分内部贡献<small>方向 / 信用风险 及其触发规则 —— 首页不展示</small></h3>
+    <div id="verdictBox"><div class="empty">等待数据…</div></div>
+  </div>
+
+  <!-- 异常检测 -->
+  <div class="card" id="anomCard">
+    <h3>异常检测<small id="anomSub" style="font-weight:400"></small></h3>
+    <div id="anomBox"><div class="empty">等待数据…</div></div>
+  </div>
+
+  <!-- 消化日数计算过程 -->
+  <div class="card">
+    <h3>消化日数の計算過程<small>可追溯到原始字段</small></h3>
+    <div id="digestCalc" class="kv"></div>
+  </div>
+
+  <!-- 数据来源 -->
+  <div class="card">
+    <h3>データ来源・公表时机<small>JPX 官方渠道</small></h3>
+    <div class="formula">
+      <div><b>信用残</b> = JPX「銘柄別信用取引残高」全銘柄日次</div>
+      <div><b>公表时机</b> = 每交易日约 16:00（日本時間），<b>次日可查</b>；遇节假日顺延</div>
+      <div><b>当前期数</b> = <span id="srcRange">—</span></div>
+      <div><b>切换说明</b> = JPX 自 2026-09-28 改版后，周次公表并入日次，故个股周次历史不再单独公开</div>
+      <div><b>估值指标</b> = GananFinance（PER/PBR・配当利回り）</div>
+      <div><b>行情与成交量</b> = Yahoo Finance（近 2 年日线，用于消化日数与股价比较）</div>
+    </div>
+  </div>
+
+  <!-- 計算公式 -->
+  <div class="card">
+    <h3>計算公式・口径</h3>
+    <div class="formula">
+      <div><b>信用倍率</b> = 信用買残 ÷ 信用売残</div>
+      <div><b>買残消化日数</b> = 信用買残 ÷ 20日平均出来高<br>
+        <span class="na">评级：&lt;0.5軽／0.5~1正常／1~3注意／3~5偏重／&gt;5混雑</span></div>
+      <div><b>買残 / 発行済株式数</b> = 上場比（JPX 官方口径，分母为発行済株式数）</div>
+      <div><b>株価 × 買残 四象限</b>：股价与买残同向=顺行／反向=背离<br>
+        <span class="na">阈值：股价 ±0.5%，买残 ±1.0%</span></div>
+      <div><b>方向（-100~+100）</b>：由四象限与估值水平决定</div>
+      <div><b>信用リスク（0~100）</b>：由消化日数、下落中买残增加、売残激增等绝对量指标决定<br>
+        <span class="na">信用风险高 ≠ 股价必跌，两者为独立维度</span></div>
+    </div>
+  </div>
+
+  <!-- 数据来源与完整性 -->
+  <div class="card">
+    <h3>データ来源与完整性</h3>
+    <div id="dataSrc" class="kv"></div>
+  </div>
+</div>
+
+<!-- ================================================================
+     Tab 3：企業・バリュエーション
+     ================================================================ -->
+<div class="tabpane hide" id="tab2">
+
+  <div class="card">
+    <h3>株価・配当<small></small></h3>
+    <div class="kv">
+      <div class="krow"><span>株価</span><b id="mPrice">—</b></div>
+      <div class="krow"><span>1株当たり予想配当</span><b id="mDps">—</b></div>
+      <div class="krow"><span>予想配当利回り</span><b id="mYield">—</b></div>
+      <div class="krow"><span id="seg">—</span></div>
+    </div>
+  </div>
+
+  <div class="duo">
+    <div class="card">
+      <h3>PER</h3>
+      <div class="band">
+        <div class="ticks"><span>最低 <b id="perMin">—</b></span>
+          <span>現在 <b id="perNow">—</b></span>
+          <span>最高 <b id="perMax">—</b></span></div>
+        <div class="track"><div class="rng" id="perRng"></div><div class="cur" id="perCur"></div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>PBR</h3>
+      <div class="band">
+        <div class="ticks"><span>最低 <b id="pbrMin">—</b></span>
+          <span>現在 <b id="pbrNow">—</b></span>
+          <span>最高 <b id="pbrMax">—</b></span></div>
+        <div class="track"><div class="rng" id="pbrRng"></div><div class="cur" id="pbrCur"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>EPS / BPS の出所と検証状態</h3>
+    <div id="epsBox" class="kv"></div>
+    <div id="vrNote" class="srcnote-slot"></div>
+  </div>
+
+  <div class="card">
+    <h3>バリュエーション基準価格<small>过去区间中枢推算，非目标价、非 DCF</small></h3>
+    <div id="c3" class="chart sm"></div>
+    <div class="note" id="ptNote"></div>
+  </div>
+</div>
+
+<!-- Tab 导航（放在内容之后，CSS 固定在底部） -->
+<div class="tabs">
+  <button class="tab on" data-t="0" onclick="switchTab(0)">概要</button>
+  <button class="tab" data-t="1" onclick="switchTab(1)">信用残詳細</button>
+  <button class="tab" data-t="2" onclick="switchTab(2)">企業・バリュエーション</button>
+</div>
+
+<div class="foot" id="foot"></div>
+
+<script src="echarts.min.js"></script>
+<script src="engine.js"></script>
+<script src="engine2.js"></script>
+<script src="official.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const ec = {};
+function chart(id){ if(!ec[id]) ec[id] = echarts.init($(id)); return ec[id]; }
+const wan = (n) => n==null ? '—' : (n/10000).toFixed(1);
+
+let SRC_MODE = 'auto';           // auto | official | ganan
+let LOCAL_OK = null;             // 本地服务探测结果
+
+function setSource(v){ SRC_MODE = v; run(); }
+
+/** 官方日次数据 → 与 Ganan 相同的行结构 */
+function officialRows(j){
+  return (j.rows||[]).map(r => ({
+    date: r.date,
+    buy: r.buy,
+    sell: r.sell,
+    ratio: r.ratio != null ? r.ratio : (r.sell>0 ? +(r.buy/r.sell).toFixed(2) : null),
+    ratioCalc: r.sell>0 ? +(r.buy/r.sell).toFixed(2) : null,
+    // 扩展字段：上場比 /前日比（用于 7 类指标）
+    sellListed: r.sellListed ?? null,
+    buyListed: r.buyListed ?? null,
+    sellChg: r.sellChg ?? null,
+    buyChg: r.buyChg ?? null,
+    name: r.name ?? null,
+  }));
+}
+
+function setStatus(type, html){
+  $('status').innerHTML = type ? `<div class="status ${type}">${html}</div>` : '';
+}
+
+async function run(forceFresh){
+  // JPX 新代码段为「数字+字母」（如 285A 铠侠 / 130A），必须保留字母。
+  // 之前用 replace(/\D/g,'') 会把 A 删掉变成 285，导致查不到。
+  const code = $('inp').value.trim().toUpperCase()
+                  .replace(/[^0-9A-Z]/g,'').slice(0,5);
+  if(!/^\d{3,4}[A-Z]?$/.test(code)){
+    setStatus('err','请输入 4 位日股代码（可带字母后缀），例如 <b>7974</b>（任天堂）· <b>285A</b>（铠侠）');
+    return;
+  }
+  $('inp').value = code;
+  setStatus('info','<span class="spin"></span>正在抓取 ' + code + ' 的信用残与估值数据…'+
+    (forceFresh?'（强制刷新）':''));
+  $('tbody').innerHTML = '<tr><td colspan="4" class="empty"><span class="spin"></span>加载中…</td></tr>';
+
+  // 估值数据始终走 Ganan（PER/PBR/配当）
+  const valP = MA.fetchValuation(code).catch(() => null);
+  const margP = (async () => {
+    if (SRC_MODE === 'ganan') return { rows: await MA.fetchMarginSeries(code), src: 'ganan' };
+    if (LOCAL_OK === null) LOCAL_OK = await MA_OFFICIAL.pingLocal();
+    if (SRC_MODE === 'official' || (SRC_MODE === 'auto' && LOCAL_OK)) {
+      try {
+        let j = null, lastErr = null;
+        // 首次访问某代码时服务端要解析多个 PDF，可能瞬时返回空/超时，做有限重试
+        for (let a = 0; a < 3; a++) {
+          try {
+            j = await MA_OFFICIAL.fetchOfficialDaily(code, 15, a === 0 ? !!forceFresh : true);
+            if (j && j.rows && j.rows.length) break;
+            lastErr = new Error('本地服务返回空数据（PDF 解析中）');
+          } catch (e) { lastErr = e; }
+          await new Promise(function(r){ setTimeout(r, 2500 * (a + 1)); });
+        }
+        if (!j || !j.rows || !j.rows.length) throw lastErr || new Error('信用残数据为空');
+        return { rows: officialRows(j), src: 'official', name: j.name };
+      } catch (e) {
+        if (SRC_MODE === 'official') throw e;   // 显式选择官方源时如实报错
+        // auto 模式静默回退
+      }
+    }
+    return { rows: await MA.fetchMarginSeries(code), src: 'ganan' };
+  })();
+
+  try{
+    const [val, marg] = await Promise.all([valP, margP]);
+    if (!val && !marg.rows.length) throw new Error('未取得任何数据');
+
+    const d = await buildAnalysis(code, val || {code}, marg.rows);
+
+    // 补齐名称
+    if (marg.name && !d.val.name) d.val.name = marg.name;
+
+    render(d);
+
+    // 详细页：完整数据范围与公表时机
+    const sr = document.getElementById('srcRange');
+    if (sr && d.rows.length) sr.textContent =
+      d.rows.length + '期：' + d.rows[0].date + ' → ' + (d.last?d.last.date:'—');
+
+    const last = d.last ? d.last.date : '—';
+    if (marg.src === 'official') {
+      // 首页只保留「哪一天的数据」，公表时刻等说明在详细页
+      setStatus('ok', '✅ JPX日次　最新 <b>'+last+'</b>　'+d.rows.length+'期');
+    } else {
+      setStatus('warn', '⚠️ 当前为 <b>Ganan 周次</b>数据（截至 '+last+
+        '）。要每日更新请在同目录运行 <code>python3 server.py</code> 后重试。');
+    }
+  }catch(e){
+    console.error(e);
+    setStatus('err','抓取失败：' + (e.message||e));
+    $('tbody').innerHTML = '<tr><td colspan="4" class="empty">无数据</td></tr>';
+  }
+}
+
+/** 复用引擎的计算逻辑，接收外部传入的信用残行 */
+async function buildAnalysis(code, val, rows){
+  rows = (rows||[]).filter(r => r.buy!=null && r.sell!=null && r.sell>0)
+                   .sort((a,b)=>a.date.localeCompare(b.date));
+  if (!rows.length) throw new Error('信用残数据为空');
+
+  // 行情与 EPS/BPS（用于 PER/PBR 区间 + 股价方向判断）
+  let bars=null, eb=null;
+  try{
+    [bars, eb] = await Promise.all([MA.fetchYahooBars(code,'2y'), MA.fetchEpsBps(code,null)]);
+  }catch(e){}
+
+  if (val.price == null && bars && bars.length) {
+    val.price = bars[bars.length-1].close;
+    val.priceSource = 'Yahoo 最新收盘';
+  }
+
+  // ---- EPS / BPS：优先财报实值，否则按现价反推（并标注是推算值） ----
+  let eps = eb && eb.eps, bps = eb && eb.bps;
+  let epsSrc = (eb && eb.source) || null;
+  let bpsSrc = (eb && eb.source) || null;   // 必须先声明（TDZ）
+  if (!eps && val.price && val.perFcst) {
+    eps = val.price / val.perFcst;
+    epsSrc = '推算（现价 ' + val.price.toLocaleString() + ' ÷ PER予想 ' + val.perFcst + '）';
+  }
+  if (!bps && val.price && val.pbrResult) {
+    bps = val.price / val.pbrResult;
+    bpsSrc = '推算（现价 ' + val.price.toLocaleString() + ' ÷ PBR結果 ' + val.pbrResult +
+             '，該 PBR 为财报公表时点的值，可能滞后于现价）';
+  }
+  if (epsSrc) val.epsSource = epsSrc;
+  if (bpsSrc) val.bpsSource = bpsSrc;
+
+  const qt = { bars, eps, bps };
+
+  // ---- 把股价按日期对齐到信用残行，供四象限判断使用 ----
+  // Yahoo 的 date 是 UTC，与 JPX 的日本日期可能差一天，故同时接受 ±1 天匹配。
+  const priceByDate = new Map();
+  if (bars) for (const b of bars) priceByDate.set(b.date, b.close);
+  const pickPrice = (d) => {
+    if (priceByDate.has(d)) return priceByDate.get(d);
+    const t = new Date(d + 'T00:00:00Z').getTime();
+    for (const off of [864e5, -864e5]) {
+      const alt = new Date(t + off).toISOString().slice(0, 10);
+      if (priceByDate.has(alt)) return priceByDate.get(alt);
+    }
+    return null;
+  };
+  for (const r of rows) r.close = pickPrice(r.date);
+
+  // 成交量（用于「買残消化日数」）
+  const volByDate = new Map();
+  if (bars) for (const b of bars) volByDate.set(b.date, b.vol);
+  for (const r of rows) {
+    r.vol = volByDate.get(r.date) ??
+            volByDate.get(new Date(new Date(r.date+'T00:00:00Z').getTime()+864e5).toISOString().slice(0,10)) ?? null;
+  }
+
+  const vr = MA.valuationRange(val, qt);
+  const pt = MA.priceTargets(val, qt);
+
+  const last = rows[rows.length-1];
+
+  // 股价 5 期变化（用于背离检测）—— 用对齐后的数据，缺失则回退 Yahoo
+  const priceChgN = (() => {
+    const withPx = rows.filter(r => r.close != null);
+    if (withPx.length < 2) return null;
+    const a = withPx[withPx.length-1].close, b = withPx[0].close;
+    return (b && a != null) ? +(((a-b)/b)*100).toFixed(1) : null;
+  })();
+  val.priceChgAligned = priceChgN;
+  if (bars && bars.length > 6) {
+    val.priceChg5 = +(((bars[bars.length-1].close - bars[bars.length-6].close)
+      / bars[bars.length-6].close) * 100).toFixed(1);
+  }
+
+  // 7 类指标 + 异常检测 + 规则引擎
+  // ctx 传入完整行情与信用残最新日：消化日数的 20 日均量由此计算，
+  // 与 marginRows 的期数（可能仅 1~5）完全解耦。
+  const ind = MA2.computeIndicators(rows, val, {
+    priceBarsAll: bars,
+    lastMarginDate: last.date,
+  });
+  const anomalies = MA2.detectAnomalies(rows, ind, val);
+  const verdict = MA2.runRules(ind, val);
+
+  return {
+    code, val, rows, last, ind, anomalies, verdict,
+    // EPS/BPS 及其来源（推算值需可追溯，避免误当财报实值）
+    pts: { eps, bps, epsSource: epsSrc, bpsSource: bpsSrc },
+    ratioStats: (function(){
+      const v = rows.map(r=>r.ratio).filter(x=>x!=null&&x>0);
+      return v.length ? { min:Math.min(...v), max:Math.max(...v), latest:v[v.length-1] } : null;
+    })(),
+    // 13週前比只由周次数据（weekly）提供，日次源一律为 null，
+    // 绝不用「13 个日历日前」这种近似替代 —— 那是伪造。
+    weekOverWeek: { buy: null, sell: null },
+    vr, pt,
+    barsN: bars ? bars.length : 0,
+    barsAll: bars || null,
+    hasBars: !!(bars&&bars.length),
+    epsSource: (eb&&eb.source) || '由 现价÷PER/PBR 反推',
+  };
+}
+
+function render(d){
+  const v = d.val, rows = d.rows, last = d.last||{};
+  const nameEl = document.getElementById('name');
+  if (nameEl) nameEl.textContent = v.name || '—';
+  const codeEl = document.getElementById('codeLbl');
+  if (codeEl) codeEl.textContent = d.code;
+
+  renderHero(d);        // 概要
+  renderDetail(d);      // 詳細页
+  renderValuation(d);   // 企业・估值页
+
+  // 图表：默认用变化率模式（初日=100 标准化）
+  // 先设PMODE 再画，确保 c4delta 读数在首次渲染时就生成
+  drawMargin(rows);
+  PMODE = 'idx';
+  const bIdx = document.getElementById('mIdx'), bAbs = document.getElementById('mAbs');
+  if (bIdx) bIdx.className = 'mbtn on';
+  if (bAbs) bAbs.className = 'mbtn';
+  drawPriceMargin(d);
+  drawTarget(d);
+
+  $('foot').innerHTML = buildFoot(d);
+}
+
+/* ================================================================
+ * Tab 概要 —— 5 秒回答 4 个问题
+ * ================================================================ */
+function renderHero(d){
+  const i = d.ind, v = d.val, q = i.quadrant;
+
+  /* --- ① 信用需給：好还是坏 ---
+     判定只看「方向 + 风险」两个已算好的分数，规则集中在此处，便于调整。*/
+  const dir = d.verdict.dir, risk = d.verdict.risk;
+  // 「短期信用需給」= 方向 + 绝对量。
+  // 红色只留给「绝对量真的重」（消化日数 >=3日 或 信用风险 >=65）；
+  // 仅方向性恶化（股价跌+买残增）而仓位不重时，用橙色「やや悪化」——
+  // 否则用户会误以为「仓位已非常危险」，与下方 1.23日/0.70% 的事实矛盾。
+  // 「絶対量」= 消化日数（仓位相对成交量）—— 这是仓位是否真的重的唯一尺度。
+  // 「方向」= 股价与买残的组合。
+  // 两者分开定级，避免「红色徽章 + 三个绿色 KPI」的自相矛盾：
+  //   · 绝对量重 → 才有资格用红
+  //   · 只是方向差/涨得太急 → 橙或黄，并在徽章后缀里点明原因
+  // 绝对量是否真的重，只看消化日数。
+  // risk 里混有「買残急剧增加」这种速度信号，若并入绝对量判定，
+  // 会出现「0.55 日消化却报红」的自相矛盾。
+  const absHeavyReal = (i.digest.days!=null && i.digest.days >= 3);
+  const absOK     = (i.digest.days!=null && i.digest.days < 1.5);
+  // 追高型：仓位不重但短期暴涨（買残 4 期 +100% 以上）
+  const chasing   = (i.long.chgN!=null && i.long.chgN > 100) && absOK;
+  let grade, gcolor, gbg;
+  if (absHeavyReal)               { grade = '🔴 短期信用需給：悪化';       gcolor = '#ff5a6e'; gbg = 'rgba(255,90,110,.12)'; }
+  else if (chasing)                { grade = '🟠 短期信用需給：要注意な急騰'; gcolor = '#f5a524'; gbg = 'rgba(245,165,36,.12)'; }
+  else if (dir < -20)              { grade = '🟠 短期信用需給：やや悪化'; gcolor = '#f5a524'; gbg = 'rgba(245,165,36,.12)'; }
+  else if (dir < -5 || risk >= 55) { grade = '🟡 短期信用需給：警戒';     gcolor = '#fbbf24'; gbg = 'rgba(251,191,36,.12)'; }
+  else if (dir >= 10 && risk < 45) { grade = '🟢 短期信用需給：改善';     gcolor = '#22c55e'; gbg = 'rgba(34,197,94,.12)'; }
+  else                            { grade = '🟡 短期信用需給：中立';     gcolor = '#fbbf24'; gbg = 'rgba(251,191,36,.12)'; }
+
+  const badge = $('hBadge');
+  badge.textContent = grade;
+  badge.style.color = gcolor;
+  badge.style.background = gbg;
+
+  /* --- 株価（顶部显示「现在株価」，不含同期涨幅） --- */
+  const pxEl = $('hPx');
+  pxEl.textContent = v.price!=null ? v.price.toLocaleString() : '—';
+  // 顶部涨幅位清空：+15.3% 那种是「与信用残同期比较」，不是现价当日涨跌，
+  // 挂在「现在株価」旁会误导用户。
+  const chgEl = $('hPxChg');
+  chgEl.textContent = '';
+  chgEl.style.color = 'var(--sub)';
+  // 信用残同期股价变化（用于 facts 卡）
+  const pc = q.priceChg!=null ? q.priceChg : (d.val.priceChgAligned!=null?d.val.priceChgAligned:null);
+
+  /* --- ② 为什么：最多 2 行解释（由已算好的四象限/消化日数/倍率拆解生成） --- */
+  $('hWhy').innerHTML = buildWhy(d, grade);
+
+  /* --- 方向与残量（两个事实，各出现一次） --- */
+  const bc = i.long.chgN, sc = i.short.chgN;
+  // 同期股价的日期范围（与信用残同范围比较）
+  const dRange = (d.rows && d.rows.length >= 2)
+    ? MA.shortMD(d.rows[0].date) + ' → ' + MA.shortMD(d.rows[d.rows.length - 1].date)
+    : '';
+  $('hFacts').innerHTML =
+    '<div class="fact"><span class="fl">信用残同期株価'+
+        (dRange?' <small class="frange">'+dRange+'</small>':'')+'</span>'+
+      '<span class="fv">'+(pc!=null?(pc>0?'+':'')+pc+'%':'—')+'</span>'+
+      '<span class="fa" style="color:'+(pc>0?'var(--sell)':'var(--buy)')+'">'+
+        (pc>0?'↗ 上昇':(pc<0?'↘ 下落':'→ 横ばい'))+'</span></div>'+
+    '<div class="fact"><span class="fl">信用買残</span>'+
+      '<span class="fv">'+(bc!=null?(bc>0?'+':'')+bc+'%':'—')+'</span>'+
+      '<span class="fa" style="color:'+(bc>0?'var(--sell)':'var(--buy)')+'">'+
+        (bc>0?'↗ 増加':(bc<0?'↘ 減少':'→ 横ばい'))+'</span></div>';
+
+  /* --- ③ 买残到底重不重：只 3 个核心指标 --- */
+  const dg = i.digest, bl = i.borrowRate;
+  const lvColor = (lvl) => lvl==='ok' ? 'var(--ok)' : (lvl==='warn' ? 'var(--warn)' : 'var(--sell)');
+  const emoji = (lvl) => lvl==='ok' ? '🟢' : (lvl==='warn' ? '🟡' : '🔴');
+
+  // 倍率评级：用「绝对倍率水平」（与区间位置、消化日数彻底分离）。
+  // 之前把「区间位置/消化日数」混入评级，导致 1.73 倍也被判「高め」。
+  const ratioAbs = (i.ratio && i.ratio.absoluteLevel)
+    ? i.ratio.absoluteLevel : MA2.absoluteRatioLevel(i.ratio && i.ratio.value);
+  const ratioLv = ratioAbs.label, ratioColor = ratioAbs.color, ratioEmoji = ratioAbs.emoji;
+  // 倍率虚高提示（卖残极少导致），独立于评级，只作说明
+  const ratioCaveat = (i.ratioDecomp && i.ratioDecomp.cause === 'shortTiny')
+    ? '売残极少のため偏高' : '';
+
+  // 発行済比の重み付け
+  const listedPct = bl.buyListed;
+  let listedLv = '—', listedColor = 'var(--sub)';
+  if (listedPct!=null){
+    if (listedPct >= 10)      { listedLv = '重い';   listedColor = 'var(--sell)'; }
+    else if (listedPct >= 3)  { listedLv = 'やや重い'; listedColor = 'var(--warn)'; }
+    else                      { listedLv = '軽い';   listedColor = 'var(--ok)'; }
+  }
+
+  $('hKpis').innerHTML =
+    kpiCard('買残消化日数',
+      dg.days!=null ? dg.days.toFixed(2)+'<small>日</small>' : '—',
+      dg.label||'—', dg.level ? emoji(dg.level)+' '+dg.label : '—', lvColor(dg.level),
+      dg.days!=null ? (dg.period+'日均量基準' + (dg.fallback ? '（降格）' : '')) : '') +
+    kpiCard('買残 / 発行済株式数',
+      listedPct!=null ? listedPct.toFixed(2)+'<small>%</small>' : '—',
+      listedLv, listedLv!=='—' ? (listedLv==='軽い'?'🟢 ':(listedLv==='やや重い'?'🟡 ':'🔴 '))+listedLv : '',
+      listedColor, '分母＝発行済株式数') +
+    kpiCard('信用倍率',
+      i.ratio.value!=null ? i.ratio.value.toFixed(2)+'<small>倍</small>' : '—',
+      ratioLv, ratioEmoji+' '+ratioLv, ratioColor,
+      ratioCaveat);
+
+  /* --- ④ 下一步观察什么 --- */
+  const w = buildWatch(d);
+  $('hWatchB').innerHTML = '<ul>'+w.map(x=>'<li>'+x+'</li>').join('')+'</ul>';
+  $('hWatch').style.display = 'block';
+}
+
+function kpiCard(k, v, lv, lvTxt, color, sub){
+  return '<div class="kpi"><div class="k">'+k+'</div>'+
+    '<div class="v">'+v+'</div>'+
+    '<div class="lv" style="color:'+(color||'var(--sub')+'">'+lvTxt+'</div>'+
+    (sub?'<div class="sub">'+sub+'</div>':'')+'</div>';
+}
+
+/** 生成 ≤2 行解释（规则引擎，文本基于已算好的指标） */
+function buildWhy(d, grade){
+  // 首页只给 1 句、≤40 字。绝对量与倍率的详细拆解下沉到「信用残詳細」。
+  const i = d.ind, q = i.quadrant, dg = i.digest;
+  const light = dg.days!=null && dg.days < 1.5;
+  const tail = {
+    accumulateDown : '株価下落中に買残が増加。短期需給はやや悪化。',
+    strong        : '株価上昇中に買残が減少。需給は改善傾向。',
+    chasing       : '上昇局面で買残が積み上がっています。',
+    deleverage    : '株価下落と信用整理が進行しています。',
+  }[q.key] || '株価と買残の向きに規則性なし。';
+  return (light ? '買残の絶対量は重くないが、' : '買残は'+ (dg.days!=null?dg.days.toFixed(1)+'日分':'相当') +'の水準で、') + tail;
+}
+
+/** ④ 下一步观察什么 */
+function buildWatch(d){
+  const i = d.ind, q = i.quadrant, v = d.val, out = [];
+  if (q.key === 'accumulateDown'){
+    out.push('信用買残が減少に転じるか');
+    out.push('株価が' + (v.price!=null?Math.round(v.price*0.98).toLocaleString():'—') + '円台を維持できるか');
+  } else if (q.key === 'chasing'){
+    out.push('買残の増加が鈍化するか');
+    out.push('株価と買残の乖離が拡大していないか');
+  } else if (q.key === 'strong'){
+    out.push('買残减少が継続するか');
+    out.push('売残の再拡大（空売り建倉）の有無');
+  } else if (q.key === 'deleverage'){
+    out.push('信用整理の終了と株価の底打ち');
+  } else {
+    out.push('信用買残と株価の向きが一致するか');
+  }
+  if (i.digest.days != null && i.digest.days >= 3){
+    out.push('消化日数 '+i.digest.days.toFixed(1)+'日 — 出来高の拡大が必要');
+  }
+  return out.slice(0, 3);
+}
+
+/* ================================================================
+ * Tab 信用残詳細
+ * ================================================================ */
+function renderDetail(d){
+  const i = d.ind, rows = d.rows, last = d.last||{};
+
+  // 数据范围标题
+  const r = i.dataRange;
+  let rt;
+  if (r.n >= 60)       rt = '（3ヶ月・13週）';
+  else if (r.n >= 20) rt = '（'+r.n+'営業日）';
+  else                 rt = '（直近'+r.n+'営業日）';
+  $('rangeTitle').textContent = rt + ' ' + (r.from||'') + ' → ' + (r.to||'');
+  $('tSub').textContent = rows.length + '期：' + (rows[0]?rows[0].date:'—') + ' → ' + (last.date||'—');
+
+  // 日次表
+  $('tbody').innerHTML = rows.slice().reverse().map(function(x){
+    return '<tr><td>'+x.date.replace(/-/g,'/')+'</td>'+
+      '<td>'+wan(x.sell)+'</td><td>'+wan(x.buy)+'</td>'+
+      '<td style="color:var(--ratio)">'+(x.ratio!=null?x.ratio.toFixed(2):'—')+'</td></tr>';
+  }).join('');
+
+  renderIndicators(d);
+  renderAnomalies(d);
+  renderVerdict(d);
+  renderDigestCalc(d);
+  renderDataSrc(d);
+}
+
+/** 消化日数计算过程（可追溯；20日与5日两个口径并列） */
+function renderDigestCalc(d){
+  const dg = d.ind.digest, rows = d.rows, last = d.last||{};
+  let s = '';
+  s += krow('信用買残（分子）', last.buy!=null ? last.buy.toLocaleString()+' 株' : '—');
+
+  // 主口径
+  s += krow(dg.period+'日平均出来高（主口径）',
+            dg.avgVolume!=null ? dg.avgVolume.toLocaleString()+' 株' : '—',
+            dg.fallback ? 'warn' : 'ok');
+  s += krow('　窗口范围', dg.winFrom ? dg.winFrom+' → '+dg.winTo+'（'+dg.samples+' 件）' : '—');
+  s += krow('　右边界（信用残最新日）', dg.cutoff||'—');
+  s += krow('　有效出来高总数', (dg.totalValid!=null?dg.totalValid:0)+' 件（行情全序列）');
+
+  // 5 日口径（同样来自完整行情）
+  s += krow('5日平均出来高（参考）',
+            dg.avgVolume5!=null ? dg.avgVolume5.toLocaleString()+' 株' : '—');
+
+  s += krow('計算結果（主口径）',
+            (dg.period||'—')+'日基準：<b>'+(dg.days!=null?dg.days.toFixed(2)+' 日':'—')+'</b>　'+
+            '5日基準：<b>'+(dg.days5!=null?dg.days5.toFixed(2)+' 日':'—')+'</b>', 'ok');
+  s += krow('评级', (dg.label||'—') + (dg.fallback ? '（降级）' : ''));
+  if (dg.fallback && dg.note) s += krow('注', dg.note, 'warn');
+
+  $('digestCalc').innerHTML = s;
+}
+
+function krow(k, v, cls){
+  return '<div class="krow'+(cls?' '+cls:'')+'"><span>'+k+'</span><b>'+v+'</b></div>';
+}
+
+/** 数据来源与完整性 */
+function renderDataSrc(d){
+  const i = d.ind;
+  let s = '';
+  s += krow('信用残来源', 'JPX 官方「銘柄別信用取引残高」');
+  s += krow('公表频率', '每交易日 16:00（全銘柄）');
+  s += krow('数据期数', i.dataRange.n + ' 期（' + (i.dataRange.from||'—') + ' → ' + (i.dataRange.to||'—') + '）');
+  s += krow('13週データ', '未取得（2026-09-28 制度変更で個票週次公表が終了）', 'warn');
+  s += krow('行情来源', d.hasBars ? 'Yahoo Finance（' + d.barsN + ' 営業日）' : '未取得', d.hasBars?'':'warn');
+  s += krow('EPS/BPS', d.pts && d.pts.bpsVerified ? '财报实值' : '未検証（推算値を計算に使用せず）',
+            d.pts && d.pts.bpsVerified ? 'ok' : 'warn');
+  s += krow('13週前比', d.weekOverWeek.buy!=null ? '有' : '—（周次数据未取得，不以短周期代替）', 'warn');
+  $('dataSrc').innerHTML = s;
+}
+
+/* ================================================================
+ * Tab 企業・バリュエーション
+ * ================================================================ */
+function renderValuation(d){
+  const v = d.val;
+  $('mPrice').textContent = v.price!=null ? v.price.toLocaleString()+' 円' : '—';
+  $('mDps').textContent   = v.dps!=null ? v.dps.toFixed(2)+' 円' : '—';
+  $('mYield').textContent = v.divYield!=null ? v.divYield.toFixed(2)+'%' : '—';
+  $('seg').textContent = (v.segment||'') + (v.sector? '　' + v.sector : '');
+
+  drawBand('per', d.vr.perMin, d.vr.perNow, d.vr.perMax);
+  drawBand('pbr', d.vr.pbrMin, d.vr.pbrNow, d.vr.pbrMax);
+
+  // EPS/BPS 出所
+  const p = d.pts || {};
+  let s = '';
+  s += krow('EPS', p.eps!=null ? p.eps.toFixed(2)+' 円' : '—');
+  s += krow('BPS', p.bpsVerified && p.bps!=null ? p.bps.toFixed(2)+' 円' : '未検証',
+            p.bpsVerified ? 'ok' : 'err');
+  s += krow('BPS 出所', p.bpsVerified ? (p.bpsSource||'财报实值') : '财报実値を未取得のため計算に使用せず',
+            p.bpsVerified ? 'ok' : 'warn');
+  $('epsBox').innerHTML = s;
+
+  $('vrNote').innerHTML = (d.vr.exact
+    ? 'PER 区间＝近2年真实日线实算（' + (d.barsN||0) + ' 个交易日）'
+    : 'PER 区间＝估算值（行情序列未取得）') +
+    (d.vr.pbrVerified ? '' :
+      '<br><b style="color:var(--sell)">PBR 区间未计算</b>：BPS 无财报实值，' +
+      '「现价÷站点PBR」反推存在时点错配（实测偏差可达 10%），故不使用。');
+}
+
+/* ================================================================
+ * Tab 切换
+ * ================================================================ */
+let CUR_TAB = 0;
+function switchTab(n){
+  CUR_TAB = n;
+  for (let k=0;k<3;k++){
+    const pane = $('tab'+k);
+    if (pane) pane.classList.toggle('hide', k!==n);
+  }
+  document.querySelectorAll('.tab').forEach(function(b){
+    b.classList.toggle('on', +b.dataset.t === n);
+  });
+  // 切到含图表的页时重算尺寸（隐藏状态下 ECharts 量不到宽高）
+  setTimeout(function(){
+    Object.values(ec).forEach(function(c){ if(c) { try{c.resize();}catch(e){} } });
+  }, 80);
+  // 概要页图表在首次进入时重画一次，确保读数与尺寸正确
+  if (n === 0 && window.__lastD) {
+    setTimeout(function(){ drawPriceMargin(window.__lastD); }, 120);
+  }
+}
+
+function buildFoot(d){
+  return '信用残：<b>JPX 官方「銘柄別信用取引残高」</b>（每交易日 16:00 全銘柄公表，经本地 server.py 解析）'+
+    (d.hasBars ? '　｜　行情：<b>Yahoo Finance</b>（日线・出来高）' : '') + '<br>' +
+    '口径：<b>信用倍率 = 信用買残 ÷ 信用売残</b>；<b>買残消化日数 = 信用買残 ÷ 20日平均出来高</b>；' +
+    '上場比 = 残量 ÷ 発行済株式数 × 100（JPX 官方口径）。<br>' +
+    '<b>方向与信用风险为独立维度</b>；信用风险高 ≠ 股价必跌。' +
+    '本页结论为数据统计结果，<b>不构成投资建议</b>。';
+}
+
+
+/* ================================================================
+ * 信用需給核心指标（面向交易）
+ * ================================================================ */
+function fmtChg(v, unit){
+  const u = unit || '%';
+  if (v == null) return '<span class="na">数据不足</span>';
+  const c = v>0?'up':(v<0?'down':'');
+  return '<b class="'+c+'">'+(v>0?'+':'')+v+u+'</b>';
+}
+function bar(pct, color){
+  const p = Math.max(0,Math.min(100,pct==null?0:pct));
+  return '<div class="ibar"><i style="width:'+p+'%;background:'+color+'"></i></div>';
+}
+
+function renderIndicators(d){
+  const i = d.ind, v = d.val;
+  const sp = i.span;
+  const spTxt = sp + '期';
+  const items = [];
+
+  /* 1 信用倍率（绝对水平 + 区间位置，两者分开） */
+  const absLv = i.ratio.absoluteLevel || MA2.absoluteRatioLevel(i.ratio.value);
+  items.push({
+    k:'1', n:'信用倍率',
+    val: i.ratio.value!=null ? i.ratio.value.toFixed(2)+'<small> 倍</small>' : '—',
+    d: '<span style="color:'+absLv.color+'">'+absLv.emoji+' 绝对水平：'+absLv.label+'</span><br>'+
+      (i.ratio.pos!=null
+        ? (i.ratio.rangeWindow < 20
+            ? i.ratio.rangeWindow+'営業日レンジ位置 <b>'+Math.round(i.ratio.pos)+'%</b>（'+
+              i.ratio.min+'~'+i.ratio.max+'倍）<br>'+
+              '<span class="na">中長期の百分位ではありません</span>'
+            : '区间位置 <b>'+Math.round(i.ratio.pos)+'%</b>（'+i.ratio.min+'~'+i.ratio.max+'倍）<br>')+
+          '前日 '+fmtChg(i.ratio.chg1)+'｜'+spTxt+' '+fmtChg(i.ratio.chgN)
+        : '<span class="na">数据不足</span>'),
+    bar: i.ratio.pos!=null ? bar(i.ratio.pos, 'var(--ratio)') : '',
+  });
+
+  /* 2 買残消化日数（核心） */
+  const dg = i.digest;
+  items.push({
+    k:'2', n:'買残消化日数',
+    val: dg.days!=null ? dg.days.toFixed(2)+'<small> 日</small>' : '—',
+    d: dg.days!=null
+      ? (dg.period+'日平均出来高 <b>'+(dg.avgVolume!=null?wan(dg.avgVolume):'—')+'</b> 万株'+
+         (dg.fallback
+           ? '<br><span style="color:var(--warn)">⚠ '+dg.note+'</span>'
+           : ''))
+      : '<span class="na">'+(dg.note||'成交量数据不足')+'</span>',
+    bar: dg.days!=null ? bar(Math.min(100, dg.days/6*100), dg.level==='ok'?'var(--ok)':'var(--sell)') : '',
+  });
+
+  /* 3 買残 / 発行済株式数（可审计：買残 / 分母 / 结果） */
+  const bl = i.borrowRate;
+  const buyAbs = i.long.value;
+  let aud;
+  if (bl.shares != null && buyAbs != null) {
+    aud = '買残 <b>'+buyAbs.toLocaleString()+'株</b><br>'+
+          '分母（発行済株式数）<b>'+bl.shares.toLocaleString()+'株</b><br>'+
+          '計算結果 <b>'+bl.buyListed+'%</b>'+
+          (bl.buyListedJpx!=null
+            ? '<br><span style="color:var(--sub)">JPX 上場比 '+bl.buyListedJpx+'%（分母=上場株式数，参考）</span>'
+            : '');
+  } else {
+    aud = '<span class="na">'+(bl.note||'データ不足')+'</span>';
+  }
+  items.push({
+    k:'3', n:'買残 / 発行済株式数',
+    val: bl.buyListed!=null ? bl.buyListed.toFixed(2)+'<small> %</small>' : '—',
+    d: aud,
+    bar: bl.buyListed!=null ? bar(Math.min(100,bl.buyListed*5), 'var(--buy)') : '',
+  });
+
+  /* 4 買残変化 */
+  items.push({
+    k:'4', n:'信用買残変化',
+    val: wan(i.long.value)+'<small> 万株</small>',
+    d: '前日 '+fmtChg(i.long.chg1)+'｜'+spTxt+' '+fmtChg(i.long.chgN)+'<br>'+
+       '13週前比 '+(i.long.chg13w!=null?fmtChg(i.long.chg13w):'<span class="na">无周次数据</span>'),
+    bar: '',
+  });
+
+  /* 5 売残変化 */
+  items.push({
+    k:'5', n:'信用売残変化',
+    val: wan(i.short.value)+'<small> 万株</small>',
+    d: '前日 '+fmtChg(i.short.chg1)+'｜'+spTxt+' '+fmtChg(i.short.chgN)+'<br>'+
+       '13週前比 '+(i.short.chg13w!=null?fmtChg(i.short.chg13w):'<span class="na">无周次数据</span>'),
+    bar: '',
+  });
+
+  /* 6 株価変化 */
+  const q = i.quadrant;
+  items.push({
+    k:'6', n:'株価変化',
+    val: q.priceChg!=null ? (q.priceChg>0?'+':'')+q.priceChg+'<small> %</small>' : '—',
+    d: q.priceChg!=null
+      ? '对比 '+spTxt+'前<br><span style="color:var(--sub)">用于与信用残方向做四象限判断</span>'
+      : '<span class="na">行情数据不足</span>',
+    bar: '',
+  });
+
+  /* 7 倍率拆解 */
+  const dc = i.ratioDecomp;
+  const causeMap = { both:'買残增加＋売残减少', longBuild:'買残堆积', shortTiny:'売残极少',
+                     mixed:'变化平缓', unknown:'数据不足' };
+  items.push({
+    k:'7', n:'倍率拆解',
+    val: '<span style="font-size:13px">'+(causeMap[dc.cause]||'—')+'</span>',
+    d: dc.causeText,
+    bar: '',
+  });
+
+  $('indBox').innerHTML = items.map(function(x){
+    return '<div class="ind">'+
+      '<div class="k"><i>'+x.k+'</i>'+x.n+'</div>'+
+      '<div class="v">'+x.val+'</div>'+ x.bar +
+      '<div class="d">'+x.d+'</div></div>';
+  }).join('');
+
+  /* ---- 四象限 ---- */
+  const qc = q.color;
+  $('quadBox').innerHTML =
+    '<div class="quad" style="border-color:'+qc+'">'+
+      '<div class="t" style="color:'+qc+'">'+q.label+'</div>'+
+      '<div class="n">📉 株価 '+(q.priceChg>0?'+':'')+q.priceChg+'%　'+
+        '📈 信用買残 '+(q.buyChg>0?'+':'')+q.buyChg+'%</div>'+
+      '<div class="d">'+q.text+'</div>'+
+    '</div>';
+
+  /* ---- 标题按真实数据范围 ---- */
+  const r = i.dataRange;
+  let rt;
+  if (r.n >= 60)      rt = '信用残 3ヶ月（約13週）推移';
+  else if (r.n >= 20)rt = '信用残 '+r.n+' 営業日推移';
+  else if (r.n >= 5) rt = '信用残 直近'+r.n+'営業日推移';
+  else                rt = '信用残 '+r.n+'日推移';
+  $('rangeTitle').textContent = rt + '（' + (r.from||'') + ' → ' + (r.to||'') + '）';
+}
+
+/* ================================================================
+ * 异常值警告
+ * ================================================================ */
+function renderAnomalies(d){
+  const list = d.anomalies || [];
+  const box = $('anomBox');
+  const h3s = $('anomCard').querySelector('h3 small');
+  if (!list.length){
+    box.innerHTML = '<div class="anom ok"><div class="t">データ整合性 OK</div>'+
+      '<div class="d">倍率計算・単位・日付にいずれも異常は検出されていません。</div></div>';
+    h3s.textContent = 'データ異常 / 分析上の注意';
+    return;
+  }
+  const dataList = list.filter(function(a){return a.kind==='data';});
+  const noteList = list.filter(function(a){return a.kind==='note';});
+
+  const sec = (title, items, cls, emptyMsg) =>
+    '<div style="font-size:11px;color:var(--sub);margin:7px 0 4px;font-weight:600">'+
+    title+'（'+items.length+'）</div>' +
+    (items.length
+      ? items.map(function(a){
+          return '<div class="anom '+a.level+'"><div class="t">'+a.title+'</div>'+
+                 '<div class="d">'+a.detail+'</div></div>';
+        }).join('')
+      : '<div class="anom ok" style="opacity:.75"><div class="d">'+emptyMsg+'</div></div>');
+
+  box.innerHTML =
+    sec('A. データ異常', dataList, 'err', '検出なし（計算・単位・日付すべて正常）') +
+    sec('B. 分析上の注意', noteList, 'info', '特になし');
+
+  const dCnt = dataList.filter(function(a){return a.level!=='info';}).length;
+  h3s.textContent = (dCnt ? '⚠ データ異常 '+dCnt+' 件／' : '') + '注意 '+noteList.length+' 件';
+}
+
+/* ================================================================
+ * 规则引擎结论：方向 / 风险 双分数
+ * ================================================================ */
+function renderVerdict(d){
+  const v = d.verdict, q = v.quadrant;
+
+  // 方向：-100~+100 → 0~100%
+  const dirPos = (v.dir + 100) / 2;
+  // 风险：0~100
+  const riskPos = v.risk;
+
+  const rItems = v.riskHits.map(function(h){
+    return '<div class="r sell" style="border-color:'+v.riskColor+'"><b>'+
+      h.whyText+'</b></div>';
+  }).join('');
+  const dItems = v.dirHits.map(function(h){
+    return '<div class="r '+(h.zone==='up'?'buy':'sell')+'"><b>'+h.whyText+'</b></div>';
+  }).join('');
+
+  $('verdictBox').innerHTML =
+    '<div class="v3">'+
+      /* 方向 */
+      '<div class="vbox dirmid">'+
+        '<div class="hd"><span>方向（多空倾向）</span><b style="color:'+v.dirColor+'">'+v.dirLabel+'</b></div>'+
+        '<div><span class="big" style="color:'+v.dirColor+'">'+(v.dir>0?'+':'')+v.dir+'</span>'+
+        '<span class="sc">/ 100</span></div>'+
+        '<div class="g"><i style="left:calc('+dirPos+'% - 1.5px)"></i></div>'+
+        '<div class="sc2">回答「偏多还是偏空」。与信用风险分开评估。</div>'+
+      '</div>'+
+      /* 信用风险 */
+      '<div class="vbox risk">'+
+        '<div class="hd"><span>信用需給リスク</span><b style="color:'+v.riskColor+'">'+v.riskLabel+'</b></div>'+
+        '<div><span class="big" style="color:'+v.riskColor+'">'+v.risk+'</span>'+
+        '<span class="sc">/ 100</span></div>'+
+        '<div class="g"><i style="left:calc('+riskPos+'% - 1.5px)"></i></div>'+
+        '<div class="sc2">回答「信用仓位是否紧张」。<b>风险高≠ 股价必跌</b>，两者是不同维度。</div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="vwhy">'+
+      (dItems ? '<div style="font-size:11px;color:var(--sub);margin-bottom:2px">【方向依据】</div>'+dItems : '')+
+      (rItems ? '<div style="font-size:11px;color:var(--sub);margin:6px 0 2px">【风险依据】</div>'+rItems : '')+
+      (!dItems && !rItems ? '<div class="r" style="border-color:var(--sub)">当前无规则触发，信用数据处于中性区间。</div>' : '')+
+    '</div>'+
+    '<div class="vfoot">'+
+      '<b>方向</b>由「股价 × 信用买残」四象限（当前判定：<span style="color:'+q.color+'">'+q.label+
+      '</span>）与估值水平决定；<b>信用风险</b>由「買残消化日数」「下落中买残增加」'+
+      '「売残激增」等绝对量指标决定。<br>'+
+      '<b>信用风险高，并不等于股价一定下跌</b> —— 例如买残堆积但成交量足以快速消化时，'+
+      '风险分高而方向未必转空；反之売残激增时风险分高且方向偏空。<br>'+
+      '<b>本结论仅为数据统计结果，不构成投资建议。</b>'+
+    '</div>';
+}
+
+/* ================================================================
+ * PER/PBR 区间条
+ * ================================================================ */
+function drawBand(k, min, now, max){
+  $(k+'Min').textContent = min!=null?min:'—';
+  $(k+'Now').textContent = now!=null?(+now).toFixed(k==='per'?1:2):'—';
+  $(k+'Max').textContent = max!=null?max:'—';
+  const r = $(k+'Rng'), c = $(k+'Cur');
+  if(min==null||max==null||now==null||max<=min){ r.style.width='0'; c.style.left='0'; return; }
+  const L=(min)/max*100, W=(max-min)/max*100, P=now/max*100;
+  r.style.left=L+'%'; r.style.width=W+'%'; c.style.left=P+'%';
+}
+
+/* 信用残推移：买残/卖残（万株，左轴）+ 倍率（倍，右轴） */
+function drawMargin(rows){
+  const c = chart('c1');
+  const xs = rows.map(r=>MA.shortMD(r.date));
+  c.setOption({
+    tooltip:{trigger:'axis',
+      backgroundColor:'#1d2536',borderColor:'#2a3448',textStyle:{color:'#e8ecf4',fontSize:12},
+      formatter:(p)=>{
+        const i=p[0].dataIndex, r=rows[i];
+        return '<b>'+r.date+'</b><br>信用買残 '+wan(r.buy)+' 万株<br>'+
+               '信用売残 '+wan(r.sell)+' 万株<br>'+
+               '信用倍率 '+(r.ratio!=null?r.ratio.toFixed(2):'—')+' 倍'+
+               (r.close?'<br>株価 '+r.close.toLocaleString()+' 円':'')+
+               (r.vol?'<br>出来高 '+wan(r.vol)+' 万株':'');
+      }},
+    legend:{data:['信用倍率（右軸）','信用買残','信用売残'],top:2,
+      textStyle:{color:'#8b96ad',fontSize:11},itemWidth:12,itemHeight:8,itemGap:14},
+    grid:{left:52,right:52,top:34,bottom:26},
+    xAxis:{type:'category',data:xs,axisLine:{lineStyle:{color:'#2a3448'}},
+      axisLabel:{color:'#8b96ad',fontSize:10}},
+    yAxis:[
+      {type:'value',name:'万株',nameTextStyle:{color:'#8b96ad',fontSize:10},
+        splitLine:{lineStyle:{color:'rgba(42,52,72,.5)'}},
+        axisLabel:{color:'#8b96ad',fontSize:10}},
+      {type:'value',name:'倍率',nameTextStyle:{color:'#8b96ad',fontSize:10},
+        splitLine:{show:false},axisLabel:{color:'#8b96ad',fontSize:10}}
+    ],
+    series:[
+      {name:'信用倍率（右軸）',type:'line',yAxisIndex:1,
+        data:rows.map(r=>r.ratio),smooth:true,symbol:'circle',symbolSize:5,
+        lineStyle:{width:2,color:'#b06cff'},itemStyle:{color:'#b06cff'}},
+      {name:'信用買残',type:'line',smooth:true,symbol:'none',
+        data:rows.map(r=>r.buy/10000),
+        lineStyle:{width:2,color:'#4a7dff'},itemStyle:{color:'#4a7dff'},
+        areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+          {offset:0,color:'rgba(74,125,255,.30)'},{offset:1,color:'rgba(74,125,255,0)'}])}},
+      {name:'信用売残',type:'line',smooth:true,symbol:'none',
+        data:rows.map(r=>r.sell/10000),
+        lineStyle:{width:2,color:'#ff5a6e'},itemStyle:{color:'#ff5a6e'},
+        areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+          {offset:0,color:'rgba(255,90,110,.26)'},{offset:1,color:'rgba(255,90,110,0)'}])}}
+    ]
+  },true);
+}
+
+/* 股价 × 信用買残：股价（左轴）+ 買残（右轴） */
+let PMODE = 'abs';     // 'abs' 実数 | 'idx' 変化率（初日=100）
+
+function setPMode(m){
+  PMODE = m;
+  const a = document.getElementById('mAbs'), b = document.getElementById('mIdx');
+  if (a) a.className = 'mbtn' + (m==='abs' ? ' on' : '');
+  if (b) b.className = 'mbtn' + (m==='idx' ? ' on' : '');
+  if (window.__lastD) drawPriceMargin(window.__lastD);
+}
+
+/* 株価 × 信用買残 —— 実数 / 変化率（初日=100）两模式
+   变化率模式让两条线起点同为 100，可直接看出背离：
+   株価 100→98.1 而 信用買残 100→104.6 即为「下落中買い残增加」。 */
+function drawPriceMargin(d){
+  window.__lastD = d;
+  if (!d.hasBars || typeof echarts === 'undefined') return;
+  const el = document.getElementById('c4');
+  if (!el) return;
+  const rows = d.rows.filter(function(r){ return r.close != null; });
+  if (rows.length < 2) return;
+  const c = chart('c4');
+  const xs = rows.map(function(r){ return MA.shortMD(r.date); });
+
+  const isIdx = PMODE === 'idx';
+  const base = rows[0];
+  const px   = rows.map(function(r){ return r.close; });
+  const buy  = rows.map(function(r){ return r.buy / 10000; });
+  // 变化率模式：以首日 = 100 标准化
+  const pxI  = isIdx ? px.map(function(v){ return +(v / base.close * 100).toFixed(1); }) : null;
+  const buyI = isIdx ? buy.map(function(v){ return +(v / buy[0] * 100).toFixed(1); }) : null;
+
+  const pxAxName  = isIdx ? '指数(初日=100)' : '円';
+  const buyAxName = isIdx ? '指数(初日=100)' : '万株';
+  const pxLabel   = isIdx ? '株価（初日=100）' : '株価（左軸）';
+  const buyLabel  = isIdx ? '信用買残（初日=100）' : '信用買残（右軸）';
+
+  // 变化率模式下两条线单位完全相同（初日=100），
+  // 必须共用一个 Y 轴 —— 双轴会各自缩放，视觉上放大差异。
+  const yAxis = isIdx ? [{
+    type:'value',name:pxAxName,nameTextStyle:{color:'#8b96ad',fontSize:10},
+    scale:true,
+    splitLine:{lineStyle:{color:'rgba(42,52,72,.5)'}},
+    axisLabel:{color:'#8b96ad',fontSize:10}
+  }] : [
+    {type:'value',name:pxAxName,nameTextStyle:{color:'#8b96ad',fontSize:10},
+      splitLine:{lineStyle:{color:'rgba(42,52,72,.5)'}},
+      axisLabel:{color:'#8b96ad',fontSize:10}},
+    {type:'value',name:buyAxName,nameTextStyle:{color:'#8b96ad',fontSize:10},
+      splitLine:{show:false},axisLabel:{color:'#8b96ad',fontSize:10}}
+  ];
+
+  c.setOption({
+    tooltip:{trigger:'axis',
+      backgroundColor:'#1d2536',borderColor:'#2a3448',textStyle:{color:'#e8ecf4',fontSize:12},
+      formatter:function(p){
+        const i = p[0].dataIndex, r = rows[i];
+        const a = isIdx ? (r.close / base.close * 100).toFixed(1)
+                        : r.close.toLocaleString()+' 円';
+        const b = isIdx ? (r.buy / base.buy * 100).toFixed(1)
+                        : wan(r.buy) + ' 万株';
+        return '<b>'+r.date+'</b><br>株価 '+a+'<br>信用買残 '+b+
+               (r.vol?'<br>出来高 '+wan(r.vol)+' 万株':'');
+      }},
+    legend:{data:[pxLabel, buyLabel],top:2,
+      textStyle:{color:'#8b96ad',fontSize:11},itemWidth:12,itemHeight:8,itemGap:14},
+    grid:{left:52,right: isIdx ? 22 : 58,top:34,bottom:34},
+    xAxis:{type:'category',data:xs,axisLine:{lineStyle:{color:'#2a3448'}},
+      axisLabel:{color:'#8b96ad',fontSize:10}},
+    yAxis: yAxis,
+    series:[
+      {name:pxLabel,type:'line',smooth:true,symbol:'circle',symbolSize:5,
+        data: isIdx ? pxI : px,
+        lineStyle:{width:2,color:'#f5a524'},itemStyle:{color:'#f5a524'}},
+      {name:buyLabel,type:'line',yAxisIndex: isIdx ? 0 : 1,smooth:true,symbol:'circle',symbolSize:5,
+        data: isIdx ? buyI : buy,
+        lineStyle:{width:2,color:'#4a7dff'},itemStyle:{color:'#4a7dff'},
+        areaStyle: isIdx ? null : {color:new echarts.graphic.LinearGradient(0,0,0,1,[
+          {offset:0,color:'rgba(74,125,255,.26)'},{offset:1,color:'rgba(74,125,255,0)'}])}}
+    ]
+  },true);
+
+  // 变化率模式给出可读结论
+  if (isIdx) {
+    const dp = pxI[pxI.length-1] - 100, db = buyI[buyI.length-1] - 100;
+    const diverge = (dp < 0 && db > 0);
+    // 结构化读数：株価 98.1 ↘ / 信用買残 104.6 ↗
+    const arrow = (v) => v > 0.05 ? '↗' : (v < -0.05 ? '↘' : '→');
+    const col   = (v) => v > 0 ? 'var(--sell)' : (v < 0 ? 'var(--buy)' : 'var(--sub)');
+    const cell  = (lbl, v, d) =>
+      '<div class="dcell"><span class="dl">'+lbl+'</span>'+
+      '<span class="dv" style="color:'+col(d)+'">'+v+'</span>'+
+      '<span class="da" style="color:'+col(d)+'">'+arrow(d)+'</span></div>';
+    // 图底只留一句，不再重复顶部结论
+    const note = diverge
+      ? '<div class="deltaNote 逆">↗ 逆行 —— 株価は下落、買残は増加</div>'
+      : (dp > 0 && db < 0
+        ? '<div class="deltaNote" style="color:var(--ok)">↘ 逆行 —— 株価は上昇、買残は減少</div>'
+        : '<div class="deltaNote" style="color:var(--sub)">同方向 —— 株価と買残は同じ向き</div>');
+    $('c4delta').innerHTML =
+      cell('株価', pxI[pxI.length-1], dp) +
+      cell('信用買残', buyI[buyI.length-1], db) + note;
+  } else {
+    const last = rows[rows.length-1];
+    $('c4delta').innerHTML =
+      '<div class="dcell"><span class="dl">株価</span>'+
+        '<span class="dv">'+last.close.toLocaleString()+'</span><span class="da">円</span></div>'+
+      '<div class="dcell"><span class="dl">信用買残</span>'+
+        '<span class="dv">'+wan(last.buy)+'</span><span class="da">万株</span></div>'+
+      '<div class="deltaNote" style="color:var(--sub)">実数表示。'+
+        '「変化率（初日=100）」に切り替えると両者の乖離が視覚的に確認できます。</div>';
+  }
+}
+/* バリュエーション基準価格（横条） */
+function drawTarget(d){
+  const c = chart('c3'), pt = d.pt;
+  const items = [];
+  if(pt.perTarget) items.push({n:'PER基準（過去レンジ中枢）',v:pt.perTarget,m:pt.avgPer});
+  // PBR 基準はBPS が財報実値のときのみ算出（engine 側のゲートで担保）
+  if(pt.pbrTarget) items.push({n:'PBR基準（過去レンジ中枢）',v:pt.pbrTarget,m:pt.avgPbr});
+  if(pt.finalTarget) items.push({n: pt.finalTargetPartial ? 'PER基準のみ（参考）' : '総合基準価格',
+                                  v:pt.finalTarget,m:null});
+
+  if(!items.length){
+    $('ptNote').innerHTML = '<b style="color:var(--sell)">算出不可</b>：' +
+      '估值計算に必要な EPS/BPS を取得できていません。';
+    c.clear(); return;
+  }
+  const vals = items.map(i => i.v).concat(d.val.price ? [d.val.price] : []);
+  const lo = Math.min(...vals) * 0.78, hi = Math.max(...vals) * 1.20;
+
+  c.setOption({
+    tooltip:{trigger:'item',backgroundColor:'#1d2536',borderColor:'#2a3448',
+      textStyle:{color:'#e8ecf4',fontSize:12},
+      formatter:(p)=>p.name+'<br><b>'+p.value[0].toLocaleString()+'</b> 円'+
+        (p.data.mult?'<br>基準 '+p.data.mult+' 倍':'')},
+    grid:{left:112,right:56,top:14,bottom:26},
+    xAxis:{type:'value',min:lo,max:hi,axisLine:{lineStyle:{color:'#2a3448'}},
+      axisLabel:{color:'#8b96ad',fontSize:10,formatter:(v)=>v.toLocaleString()},
+      splitLine:{lineStyle:{color:'rgba(42,52,72,.45)'}}},
+    yAxis:{type:'category',data:items.map(i=>i.n).reverse(),inverse:true,
+      axisLine:{show:false},axisTick:{show:false},
+      axisLabel:{color:'#8b96ad',fontSize:10.5}},
+    series:[{
+      type:'scatter',symbolSize:14,
+      data:items.map((i,idx)=>({
+        name:i.n, value:[i.v, 0], mult:i.m,
+        symbol:'circle',
+        itemStyle:{
+          color: i.n==='総合基準価格' ? '#22c55e' : '#1d2536',
+          borderColor: i.n==='総合基準価格' ? '#22c55e' : '#b06cff',
+          borderWidth:2,
+        },
+      })).reverse(),
+      label:{show:true,position:'right',color:'#e8ecf4',fontSize:11,
+        formatter:(p)=>p.value[0].toLocaleString()+' 円'},
+      markLine:{
+        symbol:'none',silent:true,
+        lineStyle:{color:'#ff5a6e',type:'dashed',width:1.5},
+        label:{color:'#ff5a6e',fontSize:10,position:'insideEndTop',
+          formatter:'株価 '+(d.val.price?d.val.price.toLocaleString():'—')},
+        data:[{xAxis:d.val.price}]
+      }
+    }]
+  },true);
+
+  $('ptNote').innerHTML =
+    'PER基準 = 予想EPS × '+(pt.avgPer?pt.avgPer.toFixed(2):'—')+'倍　｜　'+
+    (pt.bpsVerified
+      ? 'PBR基準 = BPS × '+(pt.avgPbr?pt.avgPbr.toFixed(2):'—')+'倍　｜　'+
+        '総合基準価格 = 両基準の平均'
+      : '<b style="color:var(--sell)">PBR基準 = 算出停止（BPS 未検証）</b>　｜　'+
+        '<b style="color:var(--warn)">総合基準価格 = PER基準のみ（参考）</b>') +
+    '<br>EPS '+(pt.eps?pt.eps.toFixed(2):'—')+' 円'+
+    (pt.bpsVerified
+      ? '／BPS '+(pt.bps?pt.bps.toFixed(0):'—')+' 円（財報実値）'
+      : '／BPS <span class="na">未検証（算出した値を推薦しません）</span>') +
+    '<br><b style="color:var(--warn)">※ 過去バリュエーションレンジの中央値に基づく参考値です。'+
+    'アナリストの目標株価でも DCF 評価でもありません。</b>';
+}
+
+/* Enter 触发 / 窗口缩放 */
+$('inp').addEventListener('keydown',(e)=>{ if(e.key==='Enter') run(); });
+window.addEventListener('resize',()=>Object.values(ec).forEach(c=>c&&c.resize()));
+
+run();
+</script>
+</body>
+</html>

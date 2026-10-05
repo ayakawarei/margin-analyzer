@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+日股信用残本地服务（路线 A）
+=====================================================================
+作用：抓取 JPX 官方「銘柄別信用取引残高」PDF（每交易日 16:00 更新，
+     全銘柄・每日），解析成 JSON 供前端调用，从而绕过浏览器 CORS 限制。
+
+数据源（实测 2026-10 有效）：
+  索引页https://www.jpx.co.jp/markets/statistics-equities/margin/01.html
+  文件  https://www.jpx.co.jp/markets/statistics-equities/margin/
+         tvdivq0000001rnl-att/YYYYMMDD_mtall.pdf
+         （YYYYMMDD = 申込日；9/25 改版后为每日公表）
+
+启动：python3 server.py [端口]      默认 8848
+接口：GET /api/margin?code=7974&days=20
+      GET /api/health
+"""
+
+import sys
+import re
+import json
+import io
+import glob
+import os
+import gzip
+import datetime
+import urllib.request
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs, quote
+
+BASE = "https://www.jpx.co.jp"
+INDEX = BASE + "/markets/statistics-equities/margin/01.html"
+PDF_TMPL = BASE + "/markets/statistics-equities/margin/tvdivq0000001rnl-att/{ymd}_mtall.pdf"
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# 进程内缓存： (code) -> 数据
+MEM = {}
+
+
+# ---------------------------------------------------------------- 工具
+def http_get(url, timeout=45, binary=False):
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "*/*",
+        "Accept-Language": "ja,en;q=0.9",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = r.read()
+    return data if binary else data.decode("utf-8", "ignore")
+
+
+def ymd(d):
+    return d.strftime("%Y%m%d")
+
+
+# ------------------------------------------------- 步骤1：发现可用 PDF
+def list_available(limit=15):
+    """从索引页解析出所有可下载的日次 PDF（申込日倒序）。"""
+    html = http_get(INDEX)
+    found = re.findall(
+        r'href="([^"]*?/((?:\d{8})_mtall)\.pdf)"', html)
+    #去重，按日期倒序
+    seen, out = set(), []
+    for href, fname in found:
+        m = re.match(r"(\d{8})", fname)
+        if not m:
+            continue
+        day = m.group(1)
+        if day in seen:
+            continue
+        seen.add(day)
+        out.append((day, BASE + href if href.startswith("/") else href))
+    out.sort(reverse=True)
+    return out[:limit]
+
+
+# ------------------------------------------------- 步骤2：解析单个 PDF
+CODE_RE = re.compile(r"\b(\d{4})[A-Z0-9]?\b")
+
+
+def parse_pdf(code, path):
+    """
+    从 PDF 中抽出指定代码的一行，返回买卖残、倍率与扩展指标。
+
+    解析要点（每条都对应一个真实踩过的坑）：
+      1. 代码必须**精确匹配**代码列，不能用子串 —— `if "3905" in line`
+         会命中 ISIN（JP3539050009）与邻近代码，导致串标的。
+      2. 每 3 个数字一组：残高 / 前日比 / 上場比%，残量在百分号**往前第 3 个**。
+      3. 小数百分比须整体匹配，否则 `0.1%` 被拆成 `0` 和 `1`，列位全错。
+      4. 先剥 ISIN 再剥代码，且剥代码只剥一次。
+      5. 每行下方还有英文名行（含同一代码），须过滤。
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        return None, "缺少 pdfplumber，请先 pip install pdfplumber"
+
+    try:
+        with pdfplumber.open(path) as pdf:
+            want = str(code)
+            code_re = re.compile(rf"(?<!\d){re.escape(want)}\d?[A-Z]?(?!\d)")
+            for page in pdf.pages:
+                try:
+                    text = page.extract_text() or ""
+                except Exception:
+                    continue
+                for line in text.split("\n"):
+                    if "株数" not in line:
+                        continue
+                    # 英文名行会重复代码，优先日文行（含假名/汉字）
+                    if not re.search(r"[ぁ-んァ-ン一-鿿]", line):
+                        continue
+                    if not code_re.search(line):
+                        continue
+
+                    body = re.sub(r"[A-Z]{2}\d{10,13}", " ", line)
+                    body = code_re.sub(" ", body, count=1)
+
+                    raw = re.findall(
+                        r"\d[\d,]*\.\d+%|\d[\d,]*%|[\d,]{3,}", body)
+                    nums = []
+                    for t in raw:
+                        try:
+                            nums.append((float(t.rstrip("%").replace(",", "")), t.endswith("%")))
+                        except ValueError:
+                            pass
+                    if len(nums) < 6:
+                        continue
+
+                    pct = [i for i, (_, p) in enumerate(nums) if p]
+                    if len(pct) < 2:
+                        continue
+                    i_short, i_long = pct[0] - 2, pct[1] - 2
+                    if i_short < 0 or i_long < 0:
+                        continue
+
+                    short = int(nums[i_short][0])
+                    long_ = int(nums[i_long][0])
+                    if short <= 0 or long_ <= 0:
+                        continue
+
+                    # ---- 扩展指标：制度/一般信用、貸借比率、上場比 ----
+                    # 每组仍是 3 列：残高 / 前日比 / 上場比%
+                    groups = []
+                    for gi in range(len(pct)):
+                        idx = pct[gi] - 2
+                        if idx < 0:
+                            continue
+                        groups.append({
+                            "bal": int(nums[idx][0]),
+                            "chg": int(nums[idx - 1][0]) if idx - 1 >= 0 else None,
+                            "listed": nums[pct[gi]][0],   # 上場比 %
+                        })
+
+                    neg = groups[2] if len(groups) > 2 else None   # 一般信用
+                    std = groups[3] if len(groups) > 3 else None   # 制度信用
+
+                    # ---- 异常值校验：与「買 ≥ 売」的常理冲突时判为串标的 ----
+                    listed_short = groups[0]["listed"] or 0
+                    listed_long = groups[1]["listed"] or 0
+                    rec = {
+                        "code": code,
+                        "sell": short,
+                        "buy": long_,
+                        "ratio": round(long_ / short, 2),
+                        "sellChg": groups[0]["chg"],
+                        "buyChg": groups[1]["chg"],
+                        "sellListed": listed_short,
+                        "buyListed": listed_long,
+                        "negSell": neg["bal"] if neg else None,
+                        "negBuy": neg["bal"] if neg else None,
+                        "stdSell": std["bal"] if std else None,
+                        "stdBuy": std["bal"] if std else None,
+                    }
+                    # 貸借比率（貸株残 / 発行済株式数）：无場比时跳过
+                    err = validate(rec)
+                    if err:
+                        print(f"  [skip] {code}: {err}", file=sys.stderr)
+                        continue
+
+                    # 证券種別写法不统一：
+                    #   7974 →「普通株式 プライム」；285A →「普通株プライム」（省略「式」）
+                    #   故两种都要放行。
+                    m = re.search(
+                        r"\s([^\s\d][^\d\s]*?)\s+(?:普通株式?|優先株式?)", line)
+                    rec["name"] = m.group(1) if m else None
+                    return rec, None
+    except Exception as e:  # pragma: no cover
+        return None, f"PDF 解析失败: {e}"
+    return None, "该 PDF 中未找到此代码"
+
+
+def validate(rec):
+    """
+    合理性校验。返回错误描述则判定为解析失败（多半是串标的）。
+    原则：只拦「几乎不可能」的组合，宁可漏一条也不给错数据。
+
+    注意：買残与売残的上場比本就可能差很多倍（買残通常是売残的数倍到
+    数十倍），两者互相比较没有意义。真正的判据是「残量与上場比是否自洽」。
+    """
+    sell, buy = rec["sell"], rec["buy"]
+    if sell <= 0 or buy <= 0:
+        return "残量非正"
+
+    # 1) 買残不应低于売残的 1/100。低于此值在正常市场极罕见
+    if buy * 100 < sell:
+        return (f"買/売={buy/sell:.4f} 异常小，疑似串标的"
+                f"（売{sell:,} 買{buy:,}）")
+
+    # 2) 上場比必须 <= 100%
+    for k in ("sellListed", "buyListed"):
+        v = rec.get(k)
+        if v and (v <= 0 or v > 100):
+            return f"{k}={v} 超出 0~100%，疑似串标的"
+
+    # 3) 残量与上場比自洽性：两者需指向同一「已上市股份数」。
+    #    即 sell/sellListed 与 buy/buyListed 应在同一量级（允许 3 倍误差）。
+    ls, lb = rec.get("sellListed") or 0, rec.get("buyListed") or 0
+    if ls > 0 and lb > 0:
+        implied_sell = sell / ls      # 卖残反推的上市股数
+        implied_buy = buy / lb        # 买残反推的上市股数
+        if max(implied_sell, implied_buy) / max(min(implied_sell, implied_buy), 1e-9) > 3:
+            return (f"残量与上場比不自洽（反推上市股数 "
+                    f"{implied_sell:,.0f} vs {implied_buy:,.0f}），疑似串标的")
+
+    return None
+
+
+def fetch_one_day(code, day, url):
+    """下载（带本地缓存）并解析某一天。"""
+    cpath = os.path.join(CACHE_DIR, f"{code}_{day}.json")
+    if os.path.exists(cpath):
+        try:
+            with open(cpath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    ppath = os.path.join(CACHE_DIR, f"{day}_mtall.pdf")
+    if not os.path.exists(ppath):
+        data = http_get(url, timeout=90, binary=True)
+        with open(ppath, "wb") as f:
+            f.write(data)
+
+    rec, err = parse_pdf(code, ppath)
+    if rec:
+        d = datetime.datetime.strptime(day, "%Y%m%d").date()
+        rec["date"] = d.isoformat()
+        rec["shortMD"] = f"{d.month:02d}/{d.day:02d}"
+        with open(cpath, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False)
+    else:
+        print(f"  [warn] {day} {code}: {err}", file=sys.stderr)
+    return rec
+
+
+def gather(code, days=20, fresh=False):
+    """
+    抓最近 days 个公表日的信用残，按日期升序返回。
+
+    fresh=True 时跳过内存缓存，并重新扫描 JPX 索引页。
+    重要：JPX 每日 16:00 才更新，若在 16:00 之后需要新数据，必须
+    传 fresh=True（或重启服务），否则会一直拿到旧缓存。
+    """
+    key = f"{code}:{days}"
+    if not fresh and key in MEM:
+        return MEM[key]
+
+    avail = list_available(limit=max(days, 12))
+    rows = []
+    for day, url in avail:
+        if len(rows) >= days:
+            break
+        r = fetch_one_day(code, day, url)
+        if r:
+            rows.append(r)
+
+    rows.sort(key=lambda x: x["date"])
+    MEM[key] = rows
+    return rows
+
+
+# ---------------------------------------------------------------- HTTP
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("[api] " + (fmt % args) + "\n")
+
+    def _send(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+
+        if u.path in ("/api/health", "/health"):
+            try:
+                n = len(list_available(limit=5))
+                self._send({"ok": True, "available": n})
+            except Exception as e:
+                self._send({"ok": False, "err": str(e)}, 500)
+            return
+
+        if u.path in ("/api/margin", "/margin"):
+            code = (q.get("code", [""])[0] or "").strip().upper()
+            # JPX 代码段：
+            #   旧代码 = 4 位纯数字（7974）
+            #   2024-01 起新增「数字+字母」（285A 铠侠、130A、43A 等）
+            # 注意是 3~4 位数字 + 可选字母 —— 写成 \d{4}[A-Z]? 会要求
+            # 「4 位数字后再跟字母」，而 285A 只有 3 位数字，匹配必然失败。
+            if not re.fullmatch(r"\d{3,4}[A-Z]?", code):
+                self._send({"ok": False, "err": "请提供 4 位股票代码（可带字母后缀，如 285A）"}, 400)
+                return
+            try:
+                days = int(q.get("days", ["20"])[0])
+                days = max(1, min(days, 40))
+            except ValueError:
+                days = 20
+            fresh = (q.get("fresh", ["0"])[0] or "0").lower() in ("1", "true", "yes")
+            try:
+                rows = gather(code, days, fresh=fresh)
+            except Exception as e:
+                self._send({"ok": False, "err": f"抓取失败: {e}"}, 500)
+                return
+            self._send({
+                "ok": True,
+                "code": code,
+                "name": rows[-1]["name"] if rows else None,
+                "rows": rows,
+                "count": len(rows),
+                "latest": rows[-1]["date"] if rows else None,
+                "fresh": fresh,
+                "source": "JPX 官方「銘柄別信用取引残高」（每交易日 16:00 公表）",
+            })
+            return
+
+        if u.path in ("/", "/index.html"):
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "日股信用残分析.html")
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+        self._send({"ok": False, "err": "not found"}, 404)
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8848
+    print("=" * 60)
+    print("日股信用残本地服务已启动")
+    print(f"  接口  http://127.0.0.1:{port}/api/margin?code=7974&days=20")
+    print(f"  健康  http://127.0.0.1:{port}/api/health")
+    print("=" * 60)
+    HTTPServer(("127.0.0.1", port), H).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
