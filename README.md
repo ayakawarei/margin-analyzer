@@ -44,7 +44,12 @@ https://github.com/xiejiatao369/margin-analyzer
 
 ## 界面说明
 
-> 截图位置预留：可在后续版本加入实际分析页面截图。
+以下为使用者提供的 **6981 村田製作所** 界面截图，信用残示例区间为 **2026-09-28 → 2026-10-02**。截图用于展示界面，数据、评级标签和文案属于截图时的版本；当前计算口径请参考本文后续说明。
+
+| 概要：需给判断与股价/买残走势 | 信用残明细：趋势与日次数据 | 数据来源、计算口径与完整性 |
+| --- | --- | --- |
+| <img src="docs/screenshots/overview-6981.png" alt="6981 村田製作所概要界面，展示信用需给判断与股价和买残趋势" width="260"> | <img src="docs/screenshots/margin-detail-6981.png" alt="6981 信用残明细界面，展示买残卖残倍率趋势及日次数据" width="260"> | <img src="docs/screenshots/data-sources-6981.png" alt="计算公式与数据来源完整性说明，保留使用者原有红框标注" width="260"> |
+| [查看概要原图](docs/screenshots/overview-6981.png) | [查看信用残明细原图](docs/screenshots/margin-detail-6981.png) | [查看数据来源原图](docs/screenshots/data-sources-6981.png) |
 
 页面顶部输入股票代码（默认 `7974`），选择信用残来源并点击「分析」。代码输入支持 `7974`、`4519`、`6920`，以及 `285A` 这样的字母后缀代码；具体标的能否获取数据取决于数据源覆盖和解析结果。
 
@@ -222,6 +227,7 @@ margin-analyzer/
 ├── 日股信用残分析.html       # 已内联脚本的成品
 ├── test_digest.mjs           # 消化日数回归测试
 ├── test_ratio.mjs            # 倍率/股数分母/规则回归测试
+├── docs/screenshots/         # 使用者提供的界面参考截图
 └── licenses/
     ├── ECHARTS-LICENSE.txt
     └── ECHARTS-NOTICE.txt
