@@ -56,6 +56,56 @@ function chg(rows, field, periods = 1) {
   return +(((a - b) / Math.abs(b)) * 100).toFixed(1);
 }
 
+/* =========================================================================
+ * 1b. 统一比较窗口（v4 核心修正）
+ * -------------------------------------------------------------------------
+ * 修正前的严重缺陷：
+ *   buyChg用 chg(rows,'buy',span) → 最近 N 期（如 5 期）
+ *   priceChg 用 px[0].close → px[last].close → **整个 rows 的首尾**
+ * 二者窗口不同，却在同一句判断里使用。
+ * 实测反例（10 行）：最近 5 期股价 150→120（-20%）、买残 -20%，
+ * 但整窗股价 100→120（+20%）→ priceChg 被算成 +20%，
+ * 于是「股价涨 + 买残减」被判为 strong（🟢 強い/健全）——方向完全相反。
+ *
+ * 本函数是**唯一**的比较窗口定义处：
+ *   - 起止都固定在信用残日期上（rows 的第 span 期与最后 1 期）
+ *   - 股价/买残/卖残必须使用**同一对**起止日期
+ *   - 首尾缺行情时**返回 null，绝不向内/向外扩大窗口**
+ * ========================================================================= */
+function comparisonWindow(rows, span) {
+  const n = (rows && rows.length) ? rows.length : 0;
+  // 单行（或空）时不存在可比较的区间 —— 返回 null，绝不构造 from > to 的假窗口
+  if (n < 2) return null;
+  // span 的语义 = **间隔数**（与 chg(rows,field,span) / 「近N期」文案完全一致）。
+  // 窗口 = rows[n-1-span .. n-1]，共 span+1 行。
+  // 例：10 行、span=5 → rows[4..9]，即「近5期」= 5 个间隔。
+  // 这样 priceChg 与 buyChg 的起点严格相同（同一个 rows[fromIdx]）。
+  const s = Math.max(1, Math.min(span || 1, n - 1));
+  const fromIdx = n - 1 - s;
+  const toIdx = n - 1;
+  const from = rows[fromIdx], to = rows[toIdx];
+  return {
+    from: from.date,
+    to: to.date,
+    periods: s,
+    rows: s + 1,
+    fromIdx, toIdx,
+    // 明确要求：两端都必须有价格，缺一端就不能给 priceChg
+    fromPrice: from.close != null ? from.close : null,
+    toPrice: to.close != null ? to.close : null,
+    hasBothPrices: from.close != null && to.close != null,
+  };
+}
+
+/** 按显式窗口两端算变化率 —— 与 comparisonWindow 严格同源 */
+function chgInWindow(rows, field, win) {
+  if (!win) return null;
+  const a = rows[win.toIdx] ? rows[win.toIdx][field] : null;
+  const b = rows[win.fromIdx] ? rows[win.fromIdx][field] : null;
+  if (a == null || b == null || b === 0) return null;
+  return +(((a - b) / Math.abs(b)) * 100).toFixed(1);
+}
+
 function ma(rows, field, n) {
   if (!rows || rows.length < n) return null;
   const xs = rows.slice(-n).map((r) => r[field]).filter((x) => x != null);
@@ -80,7 +130,111 @@ function slope(rows, field) {
 const toWan = (n) => (n == null ? '—' : (n / 10000).toFixed(1));
 
 /* =========================================================================
- * 1. 信用倍率拆解：倍率高到底因为什么？
+ * 1c. 公司行动（拆并股）检测 —— fail-safe 设计
+ * -------------------------------------------------------------------------
+ * 问题：Yahoo 的 close/adjClose 已做**价格**复权，但 JPX 的買残/売残是
+ * **实际股数**，没有做股数复权。1 拆 4 时买残 100万 → 400万（+300%），
+ * 价格复权后却几乎不变 → 会被误判成 long-surge + short-build。
+ *
+ * 本轮**不猜拆股比例、也不自动修正数值**（那会引入新的错误来源）。
+ * 采取 fail-safe：检测到比较窗口内有公司行动 → 标记 corporateActionAffected，
+ * 由调用方暂停 buyChg/sellChg/quadrant/long-surge/short-build/hard trigger。
+ *
+ * 检测依据（按可靠性排序）：
+ *   1. Yahoo chart API 的 events.splits（实测经代理可取到，285A 有 3:1 记录）
+ *   2. 无法取得 events 时 → **不猜测**，但若残量变化与价格复权变化
+ *      出现「典型拆股特征」（残量大幅跳变而价格未同步反向跳变），
+ *      仍置 unknown（宁可 unknown，不输出虚假变化）。
+ * ========================================================================= */
+
+/** 从 Yahoo bars 里取 splitRatio / split 事件日期集合 */
+function splitsFromBars(bars) {
+  if (!bars || !bars.length) return { splits: [], known: false };
+  // bars 若带 splits 元数据（engine.fetchYahooBars 会把 events.splits 挂上）
+  const meta = bars.__splits;
+  if (Array.isArray(meta)) {
+    return { splits: meta, known: true };
+  }
+  return { splits: [], known: false };
+}
+
+/**
+ * 判断比较窗口内是否发生公司行动。
+ * @param cmp      comparisonWindow 的结果
+ * @param barsMeta {splits:[{date,ratio}], known:boolean}
+ * @param rows     用于 fail-safe 特征判断
+ */
+function detectCorporateAction(cmp, barsMeta, rows) {
+  const out = {
+    affected: false,
+    status: 'none',      // 'none' | 'confirmed' | 'suspected'
+    reasons: [], splits: [], text: '', hits: [],
+  };
+  if (!cmp || !cmp.from || !cmp.to) return out;
+
+  // ---- 路径 1：明确的公司行动事件（confirmed）----
+  const sp = (barsMeta && barsMeta.splits) || [];
+  for (const s of sp) {
+    if (!s || !s.date) continue;
+    if (s.date >= cmp.from && s.date <= cmp.to) {
+      out.affected = true;
+      out.status = 'confirmed';
+      out.splits.push(s);
+      out.reasons.push(`${s.date} ${s.ratio || ''}`.trim());
+      out.hits.push({ kind: 'event', date: s.date, ratio: s.ratio || null });
+    }
+  }
+
+  /* ---- 路径 2：events 未知 + 残量/价格背离特征 → suspected ----
+     ★ 必须遍历比较窗口内的**所有相邻 row pair**。
+       旧实现只比较最后两行（rows[n-1] / rows[n-2]），
+       若拆股发生在窗口中段（例如 day2），而最后两行完全正常，
+       就会漏检 → 虚假方向判定被放行。
+     阈值沿用不变：buyJump > 0.5 且 |priceMove| < 0.2。 */
+  if (!out.affected && barsMeta && barsMeta.known === false && rows) {
+    // 只在比较窗口覆盖的行范围内扫描
+    const iFrom = (cmp.fromIdx != null) ? cmp.fromIdx : 0;
+    const iTo = (cmp.toIdx != null) ? cmp.toIdx : rows.length - 1;
+
+    for (let i = iFrom + 1; i <= iTo; i++) {
+      const a = rows[i], b = rows[i - 1];
+      if (!a || !b || a.buy == null || b.buy == null || b.buy <= 0) continue;
+
+      const buyJump = Math.abs((a.buy - b.buy) / b.buy);
+      if (buyJump <= 0.5) continue;                    // 阈值：> 50%
+
+      // 价格用同期复权价（引擎里 a.close 就是 adjClose 对齐结果）。
+      // 缺任一端价格 → 该 pair 不参与判定（不猜）。
+      const pxA = (a.close != null) ? a.close : null;
+      const pxB = (b.close != null) ? b.close : null;
+      const pxMove = (pxA != null && pxB != null && pxB !== 0)
+        ? Math.abs((pxA - pxB) / pxB) : null;
+      if (pxMove == null || pxMove >= 0.2) continue;  // 阈值：< 20%
+
+      out.affected = true;
+      out.status = 'suspected';
+      out.reasons.push(
+        `${b.date}→${a.date} 残量跳变 ${(buyJump * 100).toFixed(0)}% 而股价仅变动 ${(pxMove * 100).toFixed(1)}%`);
+      out.hits.push({
+        kind: 'heuristic', from: b.date, to: a.date,
+        buyJump: +(buyJump * 100).toFixed(1), priceMove: +(pxMove * 100).toFixed(1),
+      });
+      break;                                          // 任意一对命中即停止
+    }
+  }
+
+  if (out.affected) {
+    // confirmed 与 suspected 使用不同措辞 —— 前者是既定事实，后者只是可能
+    out.text = out.status === 'confirmed'
+      ? '株式分割・併合を検出。信用残変化の方向判定を停止'
+      : '株式分割・併合の可能性があります。信用残変化の方向判定を停止';
+    if (out.reasons.length) out.text += '（' + out.reasons.join('、') + '）';
+  }
+  return out;
+}
+
+/* =========================================================================
+ * 1d. 信用倍率拆解：倍率高到底因为什么？
  * -------------------------------------------------------------------------
  * 倍率 = 買残 ÷ 売残。卖残极少时倍率会失真。
  * 通过「買残/売残各自变化」判断主因，并给出可读结论。
@@ -129,20 +283,44 @@ function decomposeRatio(rows, span) {
 /* =========================================================================
  * 2. 株価 × 信用買残 四象限（v3 核心修正）
  * ========================================================================= */
-function quadrant(rows, span) {
-  const buyChg = chg(rows, 'buy', span);
-  // 股价变化用「有收盘价的行」计算；缺价格时返回 null 而非猜测
-  const px = rows.filter(r => r.close != null);
+function quadrant(rows, span, ctx) {
+  const cmp = comparisonWindow(rows, span);
+
+  // ★ 统一窗口：股价与买残用同一对起止日期
+  //   首尾缺价格 → priceChg = null（绝不缩小/扩大窗口去找别的日子）
   let priceChg = null;
-  if (px.length >= 2) {
-    const a = px[px.length - 1].close, b = px[0].close;
-    if (a != null && b) priceChg = +(((a - b) / b) * 100).toFixed(1);
+  if (cmp && cmp.hasBothPrices && cmp.fromPrice) {
+    priceChg = +(((cmp.toPrice - cmp.fromPrice) / cmp.fromPrice) * 100).toFixed(1);
+  }
+  const buyChg = cmp ? chgInWindow(rows, 'buy', cmp) : null;
+  const sellChg = cmp ? chgInWindow(rows, 'sell', cmp) : null;
+
+  // ★ 公司行动（拆并股）影响 → 方向判定一律停止
+  const ca = (ctx && ctx.corporateAction) || null;
+  const base = {
+    comparison: cmp,
+    priceChg, buyChg, sellChg,
+    corporateActionAffected: !!(ca && ca.affected),
+    corporateActionStatus: (ca && ca.status) || 'none',
+    corporateAction: ca || { affected: false, status: 'none' },
+  };
+
+  if (ca && ca.affected) {
+    return Object.assign({}, base, {
+      key: 'corporateAction', label: '— 会社行為の影響', level: 'unknown',
+      color: '#b06cff',
+      text: (ca.text || '比較期間に株式分割・併合の影響があります。') +
+            ' 信用残変化の方向判定を停止しています。',
+    });
   }
 
   if (buyChg == null || priceChg == null) {
-    return { key: 'unknown', label: '判定不能', level: 'info', color: '#8b96ad',
-             buyChg, priceChg,
-             text: '株価または信用残の推移が短く、四象限を判定できません。' };
+    return Object.assign({}, base, {
+      key: 'unknown', label: '判定不能', level: 'unknown', color: '#8b96ad',
+      text: (priceChg == null)
+        ? '比較窓の始点または終点に株価データがないため、方向を判定できません。'
+        : '株価または信用残の推移が短く、四象限を判定できません。',
+    });
   }
 
   const PD = 0.5, BD = 1.0;   // 判定阈值（接近噪音的变化不算方向）
@@ -150,46 +328,49 @@ function quadrant(rows, span) {
   const bUp = buyChg > BD,    bDn = buyChg < -BD,    bFlat = !bUp && !bDn;
 
   if (pUp && bDn) {
-    return { key: 'strong', label: '🟢 強い / 健全', level: 'ok', color: '#22c55e',
-             buyChg, priceChg,
-             text: '株価上昇中に信用買い残が減少。需給の改善であり、健全な調整。' };
+    return Object.assign({}, base, {
+      key: 'strong', label: '🟢 強い / 健全', level: 'ok', color: '#22c55e',
+      text: '株価上昇中に信用買い残が減少。需給の改善であり、健全な調整。' });
   }
   if (pUp && bUp) {
-    return { key: 'chasing', label: '🟡 注意', level: 'warn', color: '#f5a524',
-             buyChg, priceChg,
-             text: '上昇局面で信用買いが積み上がっています。上昇に伴う追高は、後の反転に注意。' };
+    return Object.assign({}, base, {
+      key: 'chasing', label: '🟡 注意', level: 'warn', color: '#f5a524',
+      text: '上昇局面で信用買いが積み上がっています。上昇に伴う追高は、後の反転に注意。' });
   }
   if (pDn && bDn) {
-    return { key: 'deleverage', label: '🟡 去杠杆', level: 'warn', color: '#f5a524',
-             buyChg, priceChg,
-             text: '株価下落と同時に信用整理が進行。売り圧の消化が進展。' };
+    // level=neutral：去杠杆 = 信用整理，方向上偏建设性（见 q-deleverage 的正向含义）。
+    // 此前标成 warn 会让「信用整理」看起来像风险信号，与事实相反。
+    return Object.assign({}, base, {
+      key: 'deleverage', label: '🟡 去杠杆', level: 'neutral', color: '#f5a524',
+      text: '株価下落と同時に信用整理が進行。売り圧の消化が進展。' });
   }
   if (pDn && bUp) {
-    return { key: 'accumulateDown', label: '🔴 下落中の買い残増加', level: 'alert', color: '#ff5a6e',
-             buyChg, priceChg,
-             text: '下落局面で信用買いが増加。ナンピン・信用買い積み上がりの可能性があり、短期需給は悪化。' };
+    return Object.assign({}, base, {
+      key: 'accumulateDown', label: '🔴 下落中の買い残増加', level: 'alert', color: '#ff5a6e',
+      text: '下落局面で信用買いが増加。ナンピン・信用買い積み上がりの可能性があり、短期需給は悪化。' });
   }
   // ---- 显式 neutral zone：股价横ばい时退化为「只看买残方向」 ----
   // 之前这里统一落 flat（label「两者都横ばい」），会把「股价横盘 + 买残暴增」
   // 误描述成「两者都横ばい」，丢失买残在动的信息。
   if (pFlat && bUp) {
-    return { key: 'marginBuildFlat', label: '🟡 買残増加（株価横ばい）', level: 'warn', color: '#f5a524',
-             buyChg, priceChg,
-             text: '株価は横ばいだが信用買い残が増加。方向は未定だが、杠杆买盘在積み上がり。' };
+    return Object.assign({}, base, {
+      key: 'marginBuildFlat', label: '🟡 買残増加（株価横ばい）', level: 'warn', color: '#f5a524',
+      text: '株価は横ばいだが信用買い残が増加。方向は未定だが、杠杆买盘在積み上がり。' });
   }
   if (pFlat && bDn) {
-    return { key: 'marginDeclineFlat', label: '🟢 買残減少（株価横ばい）', level: 'ok', color: '#22c55e',
-             buyChg, priceChg,
-             text: '株価は横ばいで信用買い残が減少。筹码在温和消化。' };
+    return Object.assign({}, base, {
+      key: 'marginDeclineFlat', label: '🟢 買残減少（株価横ばい）', level: 'ok', color: '#22c55e',
+             text: '株価は横ばいで信用買い残が減少。筹码在温和消化。' });
   }
   if (bFlat && (pUp || pDn)) {
     // 股价动但买残几乎不变：方向由股价自身决定，信用面中性
-    return { key: 'priceMoveOnly', label: '— 買残横ばい', level: 'info', color: '#8b96ad',
-             buyChg, priceChg,
-             text: '株価は' + (pUp ? '上昇' : '下落') + 'したが、信用買い残は横ばい。信用面の変化は小さい。' };
+    return Object.assign({}, base, {
+      key: 'priceMoveOnly', label: '— 買残横ばい', level: 'info', color: '#8b96ad',
+             text: '株価は' + (pUp ? '上昇' : '下落') + 'したが、信用買い残は横ばい。信用面の変化は小さい。' });
   }
-  return { key: 'flat', label: '— 方向性弱', level: 'info', color: '#8b96ad',
-           buyChg, priceChg, text: '株価・信用残ともに横ばい。方向性の読み取り材料が不足。' };
+  return Object.assign({}, base, {
+    key: 'flat', label: '— 方向性弱', level: 'info', color: '#8b96ad',
+    text: '株価・信用残ともに横ばい。方向性の読み取り材料が不足。' });
 }
 
 /* =========================================================================
@@ -305,6 +486,7 @@ function digestDays(opts) {
 function computeIndicators(rows, val, ctx) {
   const last = rows[rows.length - 1] || {};
   const R = {};
+  const ctx2 = ctx || {};
 
   // 样本自适应周期（日次数据当前仅 5~6 期）
   const span = Math.max(1, Math.min(5, rows.length - 1));
@@ -315,6 +497,23 @@ function computeIndicators(rows, val, ctx) {
     to: rows[rows.length - 1] ? rows[rows.length - 1].date : null,
     has13w: false,      // 由周次数据注入后置为 true
   };
+
+  /* 0. 统一比较窗口 + 公司行动检测（v4）
+     顺序很重要：先定窗口 → 再检测该窗口内是否有拆并股 →
+     若有，则 chgN/四象限一律置 null（fail-safe，绝不输出虚假变化）。 */
+  const cmp = comparisonWindow(rows, span);
+  R.comparison = cmp;
+
+  const caBars = ctx2.barsMeta || splitsFromBars(ctx2.priceBarsAll);
+  const ca = detectCorporateAction(cmp, caBars, rows);
+  R.corporateAction = ca;
+  const caAffected = !!ca.affected;
+  R.corporateActionAffected = caAffected;
+  R.corporateActionStatus = ca.status || 'none';
+
+  /** 受公司行动影响时，一律返回 null（不猜、不修正） */
+  const chgSafe = (field, periods) =>
+    caAffected ? null : chg(rows, field, periods);
 
   /* 1. 信用倍率 + 拆解 */
   const ratios = rows.map(r => r.ratio).filter(x => x != null && x > 0);
@@ -340,25 +539,27 @@ function computeIndicators(rows, val, ctx) {
   const maNbuy = ma(rows, 'buy', span), maNsell = ma(rows, 'sell', span);
   R.long = {
     value: last.buy,
-    chg1: chg(rows, 'buy', 1),
-    chgN: chg(rows, 'buy', span),
+    chg1: chgSafe('buy', 1),
+    chgN: chgSafe('buy', span),
     chg13w: null,            // 无周次数据时保持 null，不伪造
     ma5: ma5buy, ma20: ma20buy, maN: maNbuy,
     aboveMa5: ma5buy != null ? last.buy > ma5buy : null,
     aboveMa20: ma20buy != null ? last.buy > ma20buy : null,
     aboveMaN: (maNbuy != null && last.buy != null) ? last.buy > maNbuy : null,
     listedRatio: last.buyListed ?? null,
+    corporateActionAffected: caAffected,
   };
   R.short = {
     value: last.sell,
-    chg1: chg(rows, 'sell', 1),
-    chgN: chg(rows, 'sell', span),
+    chg1: chgSafe('sell', 1),
+    chgN: chgSafe('sell', span),
     chg13w: null,
     ma5: ma5sell, ma20: ma20sell, maN: maNsell,
     aboveMa5: ma5sell != null ? last.sell > ma5sell : null,
     aboveMa20: ma20sell != null ? last.sell > ma20sell : null,
     aboveMaN: (maNsell != null && last.sell != null) ? last.sell > maNsell : null,
     listedRatio: last.sellListed ?? null,
+    corporateActionAffected: caAffected,
   };
 
   /* 4. 变化率趋势 */
@@ -382,11 +583,12 @@ function computeIndicators(rows, val, ctx) {
   // 分母稳定性检测：JPX 上場比反推的「上場株式数」 vs Ganan 発行済株式数。
   // 若两者乖离 > 20%，说明某一来源可能有时点差（分割/增资/旧财报），
   // 此时「買残/発行済比」的绝对值不可完全信任，UI 需警示。
-  let denomStable = null, denomNote = null, impliedListed = null;
+  let denomStable = null, denomNote = null, impliedListed = null, denomDiffPct = null;
   if (shares && last.buyListed != null && last.buyListed >= 1) {
     // 上場比 >= 1% 才反推；太小时（如 0.1%）四舍五入误差巨大，反推不可靠
     impliedListed = last.buy / (last.buyListed / 100);
     const diff = (impliedListed - shares) / shares * 100;
+    denomDiffPct = +diff.toFixed(1);
     denomStable = Math.abs(diff) <= 20;
     if (!denomStable) {
       denomNote = `発行済株式数（${shares.toLocaleString()}）と JPX 上場比反推値（${Math.round(impliedListed).toLocaleString()}）が ${diff >= 0 ? '+' : ''}${diff.toFixed(0)}% 乖離。分割・増資・旧データの可能性があり、「買残/発行済比」の絶対値は参考値です。`;
@@ -395,6 +597,38 @@ function computeIndicators(rows, val, ctx) {
     denomStable = null;
     denomNote = '上場比が 1% 未満のため、反推による分母安定性は判定できません。';
   }
+
+  /* ---- denominator 完整结构（issue 5）----
+     UI 与评分都从这里读，不再各自猜测分母是谁。
+     confidence:
+       'high'      分母 = Ganan 発行済株式数，且与 JPX 上場比交叉验证一致（乖离 ≤20%）
+       'unverified'分母 = Ganan 発行済株式数，但**无法**交叉验证
+                    （上場比 <1% 时四舍五入误差过大，或 JPX 未给上場比）
+       'low'       分母与 JPX 上場比乖离 >20% —— 有明确证据表明分母不可信
+       'na'        拿不到発行済株式数，只能用 JPX 上場比（分母=上場株式数）
+     ★ 只有 'low'（有证据不可信）才禁止作为 hard trigger。
+       'unverified' 只是「没机会验证」，不等于「已证明不可信」，
+       若一并禁用会让绝大多数小盘股（上場比<1%）永远无法参与评级。*/
+  const denomConfidence = !shares ? 'na'
+    : (denomStable === true ? 'high'
+      : (denomStable === false ? 'low' : 'unverified'));
+
+  const denominator = {
+    value: shares != null ? shares
+          : (impliedListed ? Math.round(impliedListed) : null),
+    type: shares != null ? '発行済株式数' : '上場株式数',
+    date: last.date || null,
+    source: shares ? 'Ganan 発行済株式数'
+            : (impliedListed ? 'JPX 上場比から反推' : null),
+    stable: denomStable,
+    confidence: denomConfidence,
+    diffPct: denomDiffPct,
+    note: denomNote,
+    /** 该分母能否作为评级 hard trigger 的依据。
+     *  'low'（有证据不可信）与 'na'（分母根本不是发行済株式数，
+     *  而是上場株式数，两者口径不同）都不得作为 hard trigger。 */
+    usableAsHardTrigger: (denomConfidence === 'high' || denomConfidence === 'unverified'),
+  };
 
   R.borrowRate = {
     // 分母（発行済株式数，来自 Ganan）
@@ -411,6 +645,7 @@ function computeIndicators(rows, val, ctx) {
     // 分母稳定性
     denomStable: denomStable,
     denomNote: denomNote,
+    denominator: denominator,
     impliedListedShares: impliedListed ? Math.round(impliedListed) : null,
     daysToCover: null,
     note: shares ? null : '発行済株式数未取得，fallback 到 JPX 上場比（分母=上場株式数）',
@@ -428,8 +663,8 @@ function computeIndicators(rows, val, ctx) {
     lastMarginDate: _lastMDate,
   });
 
-  /* 7. 株価 × 買残 四象限（核心） */
-  R.quadrant = quadrant(rows, span);
+  /* 7. 株価 × 買残 四象限（核心）—— 传入公司行动检测结果 */
+  R.quadrant = quadrant(rows, span, { corporateAction: ca });
 
   /* 估值类（不属于信用需给，单独模块） */
   const price = val && val.price;
@@ -591,7 +826,7 @@ function detectAnomalies(rows, ind, val) {
 const RISK_RULES = [
   { id: 'digest-veryhigh', w: 30,
     test: (i) => i.digest.days != null && i.digest.days >= 5,
-    why: (i) => `買残消化日数 ${i.digest.days} 日（≥5日），按 ${i.digest.span}日均成交量需${i.digest.days}日才能消化，仓位偏重。` },
+    why: (i) => `買残消化日数 ${i.digest.days} 日（≥5日），按 ${i.digest.period}日均成交量需${i.digest.days}日才能消化，仓位偏重。` },
   { id: 'digest-high', w: 18,
     test: (i) => i.digest.days != null && i.digest.days >= 3 && i.digest.days < 5,
     why: (i) => `買残消化日数 ${i.digest.days} 日（3~5日），仓位偏重。` },
@@ -606,17 +841,40 @@ const RISK_RULES = [
     test: (i) => i.quadrant.key === 'chasing',
     why: (i) => `股价 ${i.quadrant.priceChg}% 上涨同时買残 ${i.quadrant.buyChg}% 增加，上涨伴随杠杆买盘堆积。` },
   { id: 'long-surge', w: 20,
-    test: (i) => i.long.chgN != null && i.long.chgN >= 25,
+    // 拆并股期间 chgN 已被置 null（computeIndicators 的 chgSafe），此处再显式守卫一次
+    test: (i) => !i.corporateActionAffected && i.long.chgN != null && i.long.chgN >= 25,
     why: (i) => `近${i.span}期買残激增 ${i.long.chgN}%，追高迹象明显。` },
   { id: 'short-build', w: 20,
-    test: (i) => i.short.chgN != null && i.short.chgN >= 20 && i.short.aboveMaN === true,
+    test: (i) => !i.corporateActionAffected && i.short.chgN != null && i.short.chgN >= 20 && i.short.aboveMaN === true,
     why: (i) => `近${i.span}期売残增加 ${i.short.chgN}% 并站上同周期均线，空头在建仓。` },
   { id: 'listed-high', w: 14,
-    test: (i) => i.borrowRate.buyListed != null && i.borrowRate.buyListed >= 4,
+    // ★ 分母可信度门禁（issue 5）：
+    //   denomStable === false（发行済 vs JPX上場比乖离 >20%）时，
+    //   buyListed 的绝对值不可信，**不得**作为风险加分项。
+    //   否则 3905（乖离 +20%，buyListed 31.58%）这类会仅凭低可信分母被拉高。
+    test: (i) => {
+      const bl = i.borrowRate;
+      if (!bl || bl.buyListed == null || bl.buyListed < 4) return false;
+      const d = bl.denominator;
+      return !!(d && d.usableAsHardTrigger);
+    },
     why: (i) => `買残占発行済株式数 ${i.borrowRate.buyListed}%，融资仓位占公司总股本比例偏高。` },
-  { id: 'deleveraging', w: 10,
-    test: (i) => i.quadrant.key === 'deleverage',
-    why: (i) => `股价 ${i.quadrant.priceChg}% 下落同时買残 ${i.quadrant.buyChg}%，属信用整理。` },
+  { id: 'listed-high-untrusted', w: 0, soft: true,
+    // 同上条件但分母不可信 → 只作为**提示**记录，不加风险分
+    test: (i) => {
+      const bl = i.borrowRate;
+      if (!bl || bl.buyListed == null || bl.buyListed < 4) return false;
+      const d = bl.denominator;
+      return d && !d.usableAsHardTrigger;
+    },
+    why: (i) => `買残/分母 = ${i.borrowRate.buyListed}%（分母可信度不足：${
+      (i.borrowRate.denominator && i.borrowRate.denominator.confidence) || 'na'
+    }）。参考値であり、加点には使用していません。` },
+  // ⚠ 已删除 `deleveraging w:10`（2026-10-06）
+  // 「股价下跌 + 買残下跌」= 信用整理/去杠杆，是杠杆资金在**退出**，
+  // 属于建设性动作。把它加进 RISK_RULES（纯加分体系）方向完全反了：
+  // 越是在去杠杆，风险分越高。方向侧的 q-deleverage（zone:'up'）保留，
+  // 那里表达的是「改善」含义，位置正确。
 ];
 
 const DIR_RULES = [
@@ -653,11 +911,14 @@ const VALUATION_SIGNALS = [
 ];
 
 function runRules(ind, val) {
-  const rHits = [], dHits = [];
+  const rHits = [], dHits = [], rNotes = [];
   for (const r of RISK_RULES) {
     let ok = false;
     try { ok = !!r.test(ind, val); } catch (e) { ok = false; }
-    if (ok) rHits.push({ ...r, whyText: r.why(ind, val) });
+    if (!ok) continue;
+    const item = { ...r, whyText: r.why(ind, val) };
+    // soft 规则（如分母不可信时的 listed-high）只记录提示，不参与加总
+    if (r.soft) { rNotes.push(item); } else { rHits.push(item); }
   }
   for (const r of DIR_RULES) {
     let ok = false;
@@ -665,7 +926,7 @@ function runRules(ind, val) {
     if (ok) dHits.push({ ...r, whyText: r.why(ind, val) });
   }
 
-  /* 信用风险分 0~100，越高越紧张 */
+  /* 信用风险分 0~100，越高越紧张（只累加非 soft 规则） */
   const risk = Math.max(0, Math.min(100, rHits.reduce((a, h) => a + h.w, 0)));
   let riskLabel, riskColor;
   if (risk >= 70)      { riskLabel = '高い';riskColor = '#ff5a6e'; }
@@ -685,6 +946,7 @@ function runRules(ind, val) {
 
   return {
     risk, riskLabel, riskColor, riskHits: rHits,
+    riskNotes: rNotes,          // soft：仅提示，不计分
     dir, dirLabel, dirColor, dirHits: dHits,
     quadrant: ind.quadrant,
   };
@@ -706,6 +968,9 @@ const GRADES = {
   mid:  { key: 'mid',  emoji: '🟡', label: '中立', color: '#fbbf24', bg: 'rgba(251,191,36,.12)' },
   warn: { key: 'warn', emoji: '🟠', label: '注意', color: '#f5a524', bg: 'rgba(245,165,36,.12)' },
   bad:  { key: 'bad',  emoji: '🔴', label: '悪化', color: '#ff5a6e', bg: 'rgba(255,90,110,.12)' },
+  // unknown 不是「第四档风险」，而是「判不出来」——
+  // 数据不足或受公司行动影响时，必须显示它，绝不退化成绿灯。
+  unknown: { key: 'unknown', emoji: '⚪', label: '判定不能', color: '#8b96ad', bg: 'rgba(139,150,173,.12)' },
 };
 
 /**
@@ -717,6 +982,15 @@ function creditPosition(ind) {
   const d = dg && dg.days != null ? dg.days : null;
   const p = bl && bl.buyListed != null ? bl.buyListed : null;
 
+  /* ★ fail-safe（issue 4）：
+     原则「没有发现风险 ≠ 已证明仓位轻」。
+     当两个尺度都拿不到时，**必须**返回 unknown，
+     绝不能落到 else 分支输出绿色「軽い」。*/
+  if (d == null && p == null) {
+    return { key: 'unknown', label: '判定不能', color: '#8b96ad',
+             basis: '消化日数・発行済比 いずれも算出できず', unknown: true };
+  }
+
   let key, label, color;
   if ((d != null && d >= 3) || (p != null && p >= 10))      { key='heavy'; label='重い';   color='#ff5a6e'; }
   else if ((d != null && d >= 1) || (p != null && p >= 3))  { key='normal';label='普通';   color='#f5a524'; }
@@ -725,7 +999,10 @@ function creditPosition(ind) {
   const basis = [];
   if (d != null) basis.push('消化日数 ' + d.toFixed(2) + '日');
   if (p != null) basis.push('発行済比 ' + p.toFixed(2) + '%');
-  return { key, label, color, basis: basis.join(' / ') || '—' };
+  // 部分缺失要如实说明，不能让用户以为两个尺度都验证过
+  if (d == null) basis.push('消化日数 不明');
+  if (p == null) basis.push('発行済比 不明');
+  return { key, label, color, basis: basis.join(' / '), unknown: false };
 }
 
 /**
@@ -743,15 +1020,61 @@ function creditVerdict(ind, vr) {
   const absLight = (dg.days != null && dg.days < 1.5);
   // 追高型：仓位不重但短期买残暴涨
   const surging  = (ind.long.chgN != null && ind.long.chgN > 100) && absLight;
-  const listedHeavy = (bl.buyListed != null && bl.buyListed >= 10);
 
-  let g;
-  if (absHeavy)                                   g = GRADES.bad;
-  else if (q.key === 'accumulateDown' && !absLight) g = GRADES.bad;
-  else if (listedHeavy && q.key !== 'strong')      g = GRADES.bad;
-  else if (surging || dir < -20 || risk >= 55)     g = GRADES.warn;
-  else if (dir >= 10 && risk < 45 && !absHeavy)    g = GRADES.good;
-  else                                             g = GRADES.mid;
+  /* ★ issue 5：分母可信度门禁。
+     denomStable === false（发行済 vs JPX上場比 乖离 >20%）时，
+     buyListed 的绝对值不可信 —— 不得作为 hard trigger 打出红色。*/
+  const denom = bl.denominator || null;
+  const denomTrusted = !!(denom && denom.usableAsHardTrigger);
+  const listedHeavy = (bl.buyListed != null && bl.buyListed >= 10) && denomTrusted;
+
+  /* ★ issue 3：比较窗口内有拆并股 → 一切方向/残量判断停止。
+     这是一票否决（fail-safe）：宁可 unknown，不输出虚假变化。*/
+  const caAffected = !!ind.corporateActionAffected;
+
+  let g, reasonCode = '', reasonFacts = [];
+
+  if (caAffected) {
+    g = GRADES.unknown;
+    reasonCode = 'corporateAction';
+    reasonFacts = [
+      (ind.corporateAction && ind.corporateAction.text) ||
+        '比較期間に株式分割・併合の影響があります。',
+      'buyChg / sellChg / 四象限 / long-surge / short-build はいずれも停止しています。',
+    ];
+  } else if (absHeavy) {
+    g = GRADES.bad; reasonCode = 'absHeavy';
+    reasonFacts = ['買残消化日数 ' + dg.days.toFixed(2) + '日（≥3日）＝ 絶対量が重い'];
+  } else if (q.key === 'accumulateDown' && !absLight) {
+    g = GRADES.bad; reasonCode = 'accumulateDown';
+    reasonFacts = ['株価下落中に買残が増加（下落中の信用買い積み上がり）'];
+  } else if (listedHeavy && q.key !== 'strong') {
+    g = GRADES.bad; reasonCode = 'listedHeavy';
+    reasonFacts = ['買残/発行済株式数 ' + bl.buyListed + '%（分母可信）'];
+  } else if (surging || dir < -20 || risk >= 55) {
+    g = GRADES.warn; reasonCode = 'caution';
+    if (surging)   reasonFacts.push('短期買残の急騰（' + ind.long.chgN + '%）');
+    if (dir < -20) reasonFacts.push('方向スコアが弱気優勢（' + dir + '）');
+    if (risk >= 55) reasonFacts.push('信用リスク偏高（' + risk + '）');
+  } else if (dir >= 10 && risk < 45 && !absHeavy) {
+    g = GRADES.good; reasonCode = 'improving';
+    // 文案必须与实际分数方向一致（此前误写成「弱気優勢」，与 grade 矛盾）
+    reasonFacts.push('方向スコア ' + dir + '（需給の改善傾向）');
+  } else {
+    g = GRADES.mid; reasonCode = 'neutral';
+    reasonFacts.push('方向スコア ' + dir + ' ／ 信用リスク ' + risk + '（中性圏）');
+  }
+
+  // 分母不可信时补充说明（不改变等级，但必须让用户看到）
+  if (!denomTrusted && bl.buyListed != null && bl.buyListed >= 4 && g.key !== 'unknown') {
+    reasonFacts.push('※ 買残/分母 ' + bl.buyListed + '% は分母可信度不足のため格付けに未使用');
+  }
+
+  const suffix = (g.key === 'unknown')
+    ? '（データ不足）'
+    : absHeavy ? '（買残の消化に ' + dg.days.toFixed(1) + '日）'
+    : surging ? '（買残の急騰）'
+    : (risk >= 55 ? '（信用需給が偏重）' : '');
 
   return {
     grade: g.key,
@@ -761,9 +1084,16 @@ function creditVerdict(ind, vr) {
     bg: g.bg,
     // 首页只展示这一行；suffix 用于说明「为什么是这个等级」的一句话提示
     badge: g.emoji + ' 短期信用需給：' + g.label,
-    suffix: absHeavy ? '（買残の消化に ' + dg.days.toFixed(1) + '日）'
-              : surging ? '（買残の急騰）'
-              : (risk >= 55 ? '（信用需給が偏重）' : ''),
+    suffix: suffix,
+    /* ★ issue 9：verdict 是唯一结论来源。
+       UI 不得自行重推等级，buildWhy 只能引用 reasonFacts，
+       否则会出现「徽章悪化 / 文案改善傾向」这类自相矛盾。*/
+    reasonCode: reasonCode,
+    reasonFacts: reasonFacts,
+    comparison: ind.comparison || null,
+    corporateActionAffected: caAffected,
+    corporateActionStatus: ind.corporateActionStatus || 'none',
+    denominatorConfidence: denom ? denom.confidence : 'na',
     position: creditPosition(ind),
   };
 }
@@ -784,11 +1114,21 @@ function verdictAudit(ind, vr, val) {
     try { return !!s.test(ind, val); } catch (e) { return false; }
   }).map(function (s) { return { id: s.id, label: s.label, text: s.text(ind) }; });
 
+  const noteItems = (vr.riskNotes || []).map(function (h) {
+    return { id: h.id, w: 0, text: h.whyText, soft: true };
+  });
+
   return {
     dir: vr.dir, dirLabel: vr.dirLabel, dirColor: vr.dirColor,
     risk: vr.risk, riskLabel: vr.riskLabel, riskColor: vr.riskColor,
-    dirItems: dItems, riskItems: rItems, valuationExcluded: valHits,
+    dirItems: dItems, riskItems: rItems,
+    riskNotes: noteItems,          // soft：分母不可信等「仅提示不计分」的规则
+    valuationExcluded: valHits,
     quadrant: ind.quadrant,
+    comparison: ind.comparison || null,
+    corporateActionAffected: !!ind.corporateActionAffected,
+    corporateActionStatus: ind.corporateActionStatus || 'none',
+    denominator: (ind.borrowRate && ind.borrowRate.denominator) || null,
   };
 }
 
@@ -796,6 +1136,8 @@ window.MA2 = {
   computeIndicators, detectAnomalies, runRules,
   decomposeRatio, quadrant, digestDays, absoluteRatioLevel,
   creditVerdict, creditPosition, verdictAudit,
+  // v4 新增：统一比较窗口 / 公司行动检测
+  comparisonWindow, chgInWindow, detectCorporateAction, splitsFromBars,
   stat, chg, ma, slope, sd, pctPos, toWan,
   RISK_RULES, DIR_RULES, VALUATION_SIGNALS, GRADES,
 };

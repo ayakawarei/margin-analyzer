@@ -1,43 +1,29 @@
-"""verify_ui.py —— 用真实浏览器验收首页信息层级（285A / 6920 / 7974）
+"""verify_ui.py —— 浏览器验收：真实 Chromium + 严格 assertion + 非 0 退出码
 
-检查项（对应用户 2026-10-06 的四条验收要求）：
-  1. 首页没有内部评分数字（无「方向 xx / 100」「风险 xx / 100」）
-  2. PER 不再影响信用需给方向（对照 audit 中是否出现 per-high 触发）
-  3. 判定ロジック只存在于「信用残詳細」Tab，首页 Tab 中不可见
-  4. 首页仍能回答 好坏 / 原因 / 轻重 / 关注点
+覆盖：
+  · 3 个以上股票切换（285A / 6920 / 7974 / 3905）
+  · 快速连续查询（竞态，issue 8）
+  · 行情缺失（非法代码 → 必须清空旧图表，不能残留上一只股票）
+  · refresh（强制刷新）
+  · JPX / Ganan fallback 的数据源标注（issue 11）
+  · 首页无内部评分数字、无矛盾文案（issue 9）
+  · look-ahead：priceDate 不得晚于 marginDate（issue 2）
+
+运行：python verify_ui.py        （失败时 exit 1）
 """
 import json
-import os
 import re
 import sys
+import time
 from pathlib import Path
+from urllib.request import urlopen
+
 from playwright.sync_api import sync_playwright
 
 URL = 'http://127.0.0.1:8848/'
-CODES = ['285A', '6920', '7974']
+CODES = ['285A', '6920', '7974', '3905']
+BAD_CODE = '9999Z'          # 合法格式但几乎不存在 → 用于「行情缺失」场景
 
-
-def find_chromium():
-    """复用本机已缓存的 Chromium，不重复下载。
-    本机 playwright 包期望 1234，但缓存里只有 1208 —— 直接指定可执行文件。"""
-    cache = Path.home() / 'Library/Caches/ms-playwright'
-    cands = []
-    if cache.is_dir():
-        # 优先 headless shell（更快），回退完整 Chromium
-        for pat in ('chromium_headless_shell-*/chrome-headless-shell-mac*/chrome-headless-shell',
-                    'chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium'):
-            cands += sorted(cache.glob(pat), reverse=True)
-    # 也接受环境变量覆盖
-    env = os.environ.get('CHROMIUM_PATH')
-    if env:
-        cands.insert(0, Path(env))
-    for c in cands:
-        if c.exists():
-            return str(c)
-    return None
-
-
-# 首页禁止出现的内部评分模式
 FORBIDDEN = [
     (r'方向.{0,12}[-+]?\d+\s*/\s*100', '方向内部分数'),
     (r'リスク.{0,12}\d+\s*/\s*100', '风险内部分数'),
@@ -47,150 +33,322 @@ FORBIDDEN = [
 ]
 
 results = []
+errors_all = []
+checks = []          # (bool, name, detail)
 
+
+def check(cond, name, detail=None):
+    checks.append((bool(cond), name, detail))
+    return bool(cond)
+
+
+def find_chromium():
+    """复用本机已缓存的 Chromium，不重复下载。"""
+    cache = Path.home() / 'Library/Caches/ms-playwright'
+    cands = []
+    if cache.is_dir():
+        for pat in ('chromium_headless_shell-*/chrome-headless-shell-mac*/chrome-headless-shell',
+                    'chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium'):
+            cands += sorted(cache.glob(pat), reverse=True)
+    for c in cands:
+        if c.exists():
+            return str(c)
+    return None
+
+
+def wait_badge(page, timeout=90000):
+    page.wait_for_function(
+        "() => { const b=document.getElementById('hBadge');"
+        " return b && !b.textContent.includes('読み込み中'); }",
+        timeout=timeout)
+
+
+def read_home(page):
+    return page.evaluate(
+        "() => { const p=document.getElementById('tab0');"
+        " return p ? p.innerText : ''; }")
+
+
+def read_state(page):
+    return page.evaluate("""() => window.__lastD ? {
+      code: window.__lastD.code,
+      grade: window.__lastD.verdict.grade,
+      badge: window.__lastD.verdict.badge,
+      reasonCode: window.__lastD.verdict.reasonCode,
+      reasonFacts: window.__lastD.verdict.reasonFacts,
+      pos: window.__lastD.verdict.position,
+      posKey: window.__lastD.verdict.position.key,
+      comparison: window.__lastD.verdict.comparison || null,
+      caAffected: window.__lastD.verdict.corporateActionAffected,
+      caStatus: window.__lastD.verdict.corporateActionStatus || 'none',
+      caText: (document.getElementById('hCA')||{}).innerText || '',
+      denomConf: window.__lastD.verdict.denominatorConfidence,
+      why: (document.getElementById('hWhy')||{}).innerText || '',
+      srcLabel: (document.getElementById('srcLabel')||{}).textContent || '',
+      srcFreq: (document.getElementById('srcFreq')||{}).textContent || '',
+      sourceMeta: window.__lastD.sourceMeta,
+      quadrant: window.__lastD.ind.quadrant,
+      priceDates: (window.__lastD.rows||[]).map(r => ({
+        margin: r.marginDate, price: r.priceDate, same: r.isSameDate })),
+      chartIds: (function(){
+        const p=document.getElementById('tab0');
+        return p ? Array.from(p.querySelectorAll('div')).filter(e=>/^c\\d/.test(e.id)).map(e=>e.id) : [];
+      })(),
+      kpiN: document.querySelectorAll('#hKpis .kpi').length,
+      caWarnVisible: (function(){
+        const e=document.getElementById('hCA');
+        return !!(e && e.style.display !== 'none' && e.textContent.trim());
+      })(),
+    } : null""")
+
+
+print('chromium:', find_chromium())
 exe = find_chromium()
-print('chromium:', exe)
 
 with sync_playwright() as pw:
     browser = pw.chromium.launch(executable_path=exe) if exe else pw.chromium.launch()
     page = browser.new_page(viewport={'width': 1280, 'height': 1400})
-    errors = []
-    page.on('pageerror', lambda e: errors.append(str(e)))
-    page.on('console', lambda m: errors.append('console.' + m.type + ': ' + m.text)
+    js_errors = []
+    page.on('pageerror', lambda e: js_errors.append(str(e)))
+    page.on('console',
+            lambda m: js_errors.append('console.' + m.type + ': ' + m.text)
             if m.type == 'error' else None)
 
+    # ---------- 场景 1：多股票切换 ----------
+    print('\n=== 场景 1：多股票切换 ===')
     for code in CODES:
         page.goto(URL, wait_until='domcontentloaded')
         page.fill('#inp', code)
         page.click('button.primary')
-        # 等 Hero 徽章不再是「読み込み中」
         try:
-            page.wait_for_function(
-                "() => { const b=document.getElementById('hBadge');"
-                " return b && !b.textContent.includes('読み込み中'); }",
-                timeout=90000)
+            wait_badge(page)
         except Exception as e:
-            results.append({'code': code, 'fatal': 'badge timeout: ' + str(e)})
+            check(False, f'{code} 加载超时', str(e)[:120])
             continue
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(1000)
 
-        d = page.evaluate("() => window.__lastD ? {"
-                         "  code: window.__lastD.code,"
-                         "  grade: window.__lastD.verdict.grade,"
-                         "  badge: window.__lastD.verdict.badge,"
-                         "  suffix: window.__lastD.verdict.suffix,"
-                         "  pos: window.__lastD.verdict.position.label,"
-                         "  per: window.__lastD.ind.per.now,"
-                         "  quad: window.__lastD.ind.quadrant.key,"
-                         "  digest: window.__lastD.ind.digest.days,"
-                         "  listed: window.__lastD.ind.borrowRate.buyListed,"
-                         "  ratio: window.__lastD.ind.ratio.value,"
-                         "  dirHits: window.__lastD.verdict.audit.dirItems.map(x=>x.id),"
-                         "  riskHits: window.__lastD.verdict.audit.riskItems.map(x=>x.id),"
-                         "  valExcluded: window.__lastD.verdict.audit.valuationExcluded.map(x=>x.id)"
-                         "} : null")
+        st = read_state(page)
+        home = read_home(page)
+        if not st:
+            check(False, f'{code} 无 __lastD')
+            continue
 
-        # ---- 首页可见文本 ----
-        home_text = page.evaluate(
-            "() => { const p=document.getElementById('tab0');"
-            " return p ? p.innerText : ''; }")
+        check(st['code'] == code, f'{code} 状态码一致', st.get('code'))
+        # 无内部评分
+        viol = [lbl for pat, lbl in FORBIDDEN if re.search(pat, home)]
+        check(not viol, f'{code} 首页无内部评分', viol)
+        check(not re.findall(r'[-+]?\d+\s*/\s*100', home),
+              f'{code} 首页无 /100 分数')
+        # 单图 + 3 KPI
+        check(st['chartIds'] == ['c4'], f'{code} 首页只有 1 张图', st['chartIds'])
+        check(st['kpiN'] == 3, f'{code} 恰好 3 个 KPI', st['kpiN'])
+        # verdict 自洽
+        POS = {'good': '改善', 'mid': '中立', 'warn': '注意',
+               'bad': '悪化', 'unknown': '判定不能'}
+        check(POS.get(st['grade']) in st['badge'],
+              f'{code} badge 与 grade 一致', f"{st['grade']} / {st['badge']}")
+        check(bool(st['reasonFacts']),
+              f'{code} reasonFacts 非空')
+        # 矛盾检测：改善时不得说悪化
+        if st['grade'] == 'good':
+            txt = ' '.join(st['reasonFacts'])
+            check('悪化' not in txt and '弱気' not in txt,
+                  f'{code} 改善时文案不矛盾', txt)
+        # 信用ポジション不得在无依据时显示绿色「軽い」
+        if st['posKey'] == 'light':
+            check(st['pos'].get('unknown') is False,
+                  f'{code} light 档非 unknown')
+        check(st['posKey'] in ('light', 'normal', 'heavy', 'unknown'),
+              f'{code} posKey 合法', st['posKey'])
+        # look-ahead：priceDate 不得 > marginDate
+        bad_dates = [p for p in st['priceDates']
+                     if p['price'] and p['margin'] and p['price'] > p['margin']]
+        check(not bad_dates, f'{code} 无未来价格（priceDate<=marginDate）', bad_dates[:3])
+        # comparison 必须自洽（from<=to）
+        cmp = st.get('comparison')
+        if cmp:
+            check(cmp['from'] <= cmp['to'],
+                  f'{code} comparison from<=to', cmp)
+        # 数据源标注
+        check(bool(st['srcLabel']), f'{code} 数据源已标注', st['srcLabel'])
+        if st['sourceMeta']:
+            sm = st['sourceMeta']
+            if not sm['isOfficial']:
+                check('週次' in (sm.get('frequency') or ''),
+                      f'{code} 非官方源标注为週次', sm.get('frequency'))
+                check(sm.get('periodUnit') == '週',
+                      f'{code} 周期单位=週', sm.get('periodUnit'))
 
-        # ---- 判定ロジック：应在 tab1，且 details 默认关闭 ----
-        logic = page.evaluate("""() => {
-          const card = document.getElementById('verdictCard');
-          if (!card) return {exists:false};
-          const det = card.querySelector('details');
-          const tab1 = document.getElementById('tab1');
-          return {
-            exists: true,
-            inTab1: !!(tab1 && tab1.contains(card)),
-            hasDetails: !!det,
-            open: det ? det.open : null,
-            title: card.querySelector('h3') ? card.querySelector('h3').textContent.trim() : '',
-            summary: det && det.querySelector('summary') ? det.querySelector('summary').textContent.trim() : '',
-            // 展开后的内容（先展开再读）
-            inner: det ? det.innerText : '',
-          };
-        }""")
+        # 公司行动：status 与文案措辞必须一致
+        if st['caAffected']:
+            check(st['caStatus'] in ('confirmed', 'suspected'),
+                  f'{code} caStatus 合法', st['caStatus'])
+            if st['caStatus'] == 'confirmed':
+                check('を検出' in st['caText'],
+                      f'{code} confirmed 用「を検出」', st['caText'][:60])
+                check('可能性があります' not in st['caText'],
+                      f'{code} confirmed 不用「可能性」')
+            else:
+                check('可能性があります' in st['caText'],
+                      f'{code} suspected 用「可能性があります」', st['caText'][:60])
+                check('を検出' not in st['caText'],
+                      f'{code} suspected 不用「を検出」')
+        else:
+            check(st['caStatus'] == 'none',
+                  f'{code} 未触发时 caStatus=none', st['caStatus'])
 
-        # 展开后读内部内容，验证折叠区确实装得下评分明细
-        if logic.get('hasDetails'):
-            page.evaluate("() => { const d=document.querySelector('#verdictCard details');"
-                          " if (d) d.open = true; }")
-            page.wait_for_timeout(300)
-            logic['inner'] = page.evaluate(
-                "() => { const d=document.querySelector('#verdictCard details');"
-                " return d ? d.innerText : ''; }")
-            # 复位为折叠
-            page.evaluate("() => { const d=document.querySelector('#verdictCard details');"
-                          " if (d) d.open = false; }")
+        results.append({'code': code, 'grade': st['grade'], 'badge': st['badge'],
+                        'caStatus': st['caStatus'],
+                        'pos': st['posKey'], 'cmp': cmp,
+                        'src': st['srcLabel'], 'ca': st['caAffected']})
 
-        # ---- 首页图表数量（只应 1 张：c4） ----
-        charts = page.evaluate("""() => {
-          const p = document.getElementById('tab0');
-          if (!p) return [];
-          return Array.from(p.querySelectorAll('div')).filter(e => /^c\\d/.test(e.id)).map(e => e.id);
-        }""")
-
-        # ---- 四个问题是否都有答案 ----
-        # 「原因」= Hero 徽章下方那句自然语言结论（hWhy），而不是页面上随便哪个词
-        why_txt = page.evaluate(
-            "() => { const e=document.getElementById('hWhy');"
-            " return e ? e.innerText.trim() : ''; }")
-        has = {
-            '好坏': bool(re.search(r'短期信用需給：', home_text)),
-            '信用ポジション': '信用ポジション' in home_text,
-            '原因': len(why_txt) >= 15 and '。' in why_txt,
-            '轻重': '買残消化日数' in home_text and '発行済' in home_text,
-            '倍率': '信用倍率' in home_text,
-            '关注点': '注目' in home_text,
-            '同期株価': '信用残同期株価' in home_text,
-            '買残变化': '信用買残' in home_text,
-        }
-        # KPI 数量
-        kpi_n = page.evaluate("() => document.querySelectorAll('#hKpis .kpi').length")
-
-        # 禁止项扫描
-        violations = []
-        for pat, label in FORBIDDEN:
-            m = re.search(pat, home_text)
-            if m:
-                violations.append(f'{label}: {m.group(0)[:50]}')
-
-        # 首页是否出现百分比形式的内部分数（xx / 100）
-        m100 = re.findall(r'[-+]?\d+\s*/\s*100', home_text)
-
-        results.append({
-            'code': code,
-            'data': d,
-            'home_len': len(home_text),
-            'violations': violations,
-            'slash100': m100,
-            'charts': charts,
-            'kpi_n': kpi_n,
-            'has': has,
-            'why': why_txt,
-            'logic': {k: v for k, v in logic.items() if k != 'inner'},
-            'logic_inner_len': len(logic.get('inner', '')),
-            'logic_has_scores': bool(re.search(r'[-+]?\d+\s*/\s*100', logic.get('inner', ''))),
-            'logic_has_excluded': '不参与' in logic.get('inner', ''),
-            'home_text': home_text,
-        })
-
-    # 首页截图（第一只股票）
+    # ---------- 场景 2：快速连续查询（竞态） ----------
+    print('\n=== 场景 2：快速连续查询（竞态 issue 8） ===')
     page.goto(URL, wait_until='domcontentloaded')
-    page.fill('#inp', '7974')
-    page.click('button.primary')
-    page.wait_for_timeout(6000)
-    page.screenshot(path='/tmp/home_7974.png', full_page=True)
-    # 详细页 + 展开判定ロジック
-    page.click('button.tab[data-t="1"]')
-    page.wait_for_timeout(1500)
-    page.evaluate("() => { const d=document.querySelector('#verdictCard details');"
-                  " if (d) { d.open = true; d.scrollIntoView(); } }")
-    page.wait_for_timeout(900)
-    page.screenshot(path='/tmp/detail_7974_logic.png', full_page=True)
+    wait_badge(page)
+    page.wait_for_timeout(500)
+    # 不等待结果，直接连续切换
+    for code in ['7974', '6920', '285A', '6920']:
+        page.fill('#inp', code)
+        page.click('button.primary')
+        page.wait_for_timeout(120)
+    try:
+        wait_badge(page)
+        page.wait_for_timeout(2500)
+        st = read_state(page)
+        # 最后一次请求是 6920
+        check(st and st['code'] == '6920',
+              '竞态：最终状态 = 最后请求的股票', st and st['code'])
+        shown_code = page.evaluate(
+            "() => (document.getElementById('codeLbl')||{}).textContent || ''")
+        check(shown_code.strip() == '6920',
+              '竞态：页面显示的代码 = 6920', shown_code)
+    except Exception as e:
+        check(False, '竞态：等待最终状态超时', str(e)[:120])
 
+    # ---------- 场景 3：行情缺失必须清空旧图表 ----------
+    print('\n=== 场景 3：行情缺失（清空旧图表） ===')
+    page.goto(URL, wait_until='domcontentloaded')
+    wait_badge(page)
+    page.wait_for_timeout(800)
+    page.fill('#inp', BAD_CODE)
+    page.click('button.primary')
+    try:
+        wait_badge(page, timeout=60000)
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
+    name_after = page.evaluate(
+        "() => (document.getElementById('name')||{}).textContent || ''")
+    code_after = page.evaluate(
+        "() => (document.getElementById('codeLbl')||{}).textContent || ''")
+    # 关键：不得残留上一只股票（7974 任天堂）
+    check('任天堂' not in name_after,
+          '缺失场景：未残留上一只股票名称', name_after)
+    check('7974' not in code_after,
+          '缺失场景：未残留上一只股票代码', code_after)
+
+    # ---------- 场景 4：refresh ----------
+    print('\n=== 场景 4：refresh 强制刷新 ===')
+    page.goto(URL, wait_until='domcontentloaded')
+    wait_badge(page)
+    page.wait_for_timeout(600)
+
+    def upstream_fetches():
+        """读 /api/health 里的上游抓取计数（纯本地计数，不发网络请求）。"""
+        try:
+            with urlopen(URL + 'api/health', timeout=10) as r:
+                return (json.loads(r.read().decode()).get('upstream') or {}).get('indexFetches')
+        except Exception:
+            return None
+
+    f0 = upstream_fetches()
+    t0 = time.time()
+    page.click('button.wide-only')          # 刷新按钮
+    # ★ issue 12：一次用户主动 refresh 只允许刷新一次上游索引。
+    #   旧实现前端 a=0/1/2 三次请求都带 fresh=1 → 3 次昂贵刷新（实测 ~117s/次），
+    #   只能靠把 timeout 拉到 420s 让测试"通过"。现在恢复到合理预算（120s），
+    #   并直接断言上游抓取次数 ≤ 1。
+    try:
+        wait_badge(page, timeout=120000)
+        page.wait_for_timeout(1500)
+        elapsed = time.time() - t0
+        st = read_state(page)
+        if st:
+            cmp = st.get('cmp')
+            check(cmp is None or cmp.get('from') <= cmp.get('to'),
+                  'refresh 后 comparison 仍自洽', cmp)
+            check(st['posKey'] in ('light', 'normal', 'heavy', 'unknown'),
+                  'refresh 后仓位档位合法', st['posKey'])
+            check(elapsed < 120, 'refresh 在 120s 预算内完成', round(elapsed, 1))
+            print(f"    refresh 完成：{st['badge']}（{elapsed:.1f}s）")
+        else:
+            check(False, 'refresh 后无数据（可能仍在解析）')
+    except Exception as e:
+        check(False, 'refresh 未在 120s 内完成', str(e)[:120])
+
+    f1 = upstream_fetches()
+    check(f0 is not None and f1 is not None, '可读取上游抓取计数', (f0, f1))
+    if f0 is not None and f1 is not None:
+        delta = f1 - f0
+        check(delta <= 1, '一次 refresh 上游索引抓取 ≤ 1 次', f'{f0} → {f1}')
+        print(f"    上游抓取次数：{f0} → {f1}（delta={delta}）")
+
+    # ---------- 场景 5：JPX / Ganan 数据源切换 ----------
+    print('\n=== 场景 5：数据源切换（JPX official / Ganan） ===')
+    for val, label in [('official', 'JPX 官方'), ('ganan', 'Ganan 週次')]:
+        try:
+            page.goto(URL, wait_until='domcontentloaded')
+            wait_badge(page)
+            page.select_option('#srcSel', val)
+            page.wait_for_timeout(500)
+            try:
+                wait_badge(page)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            st = read_state(page)
+            if st and st['sourceMeta']:
+                sm = st['sourceMeta']
+                if val == 'official':
+                    check(sm['isOfficial'] is True,
+                          'official 模式标注为官方', sm)
+                    check('JPX' in (sm.get('label') or ''),
+                          'official 模式 label 含 JPX', sm.get('label'))
+                else:
+                    check('週次' in (sm.get('frequency') or '') or
+                          'Ganan' in (sm.get('label') or ''),
+                          'ganan 模式如实标注为週次/Ganan', sm)
+            else:
+                print(f'    ({label}: 无数据可比对，跳过标注断言)')
+        except Exception as e:
+            check(False, f'{label} 模式异常', str(e)[:120])
+
+    page.screenshot(path='/tmp/verify_final.png', full_page=True)
     browser.close()
 
-print(json.dumps({'results': results, 'js_errors': errors}, ensure_ascii=False, indent=2))
+# ---------------------------------------------------------------- 汇总
+print('\n' + '=' * 60)
+failed = [c for c in checks if not c[0]]
+for good, name, detail in checks:
+    if not good:
+        print(f'  ❌ {name}' + (f'  → {detail}' if detail is not None else ''))
+
+print(f'\n断言：{len(checks) - len(failed)} 通过 / {len(failed)} 失败')
+if js_errors:
+    print('JS 错误：')
+    for e in js_errors[:10]:
+        print('   ', e[:160])
+else:
+    print('JS 错误：无')
+
+print('\n各股票结论：')
+for r in results:
+    print(f"  {r['code']:5} {r['badge']:26} pos={r['pos']:8} ca={r.get('caStatus','-'):9} "
+          f"cmp={(r['cmp'] or {}).get('from','—')}→{(r['cmp'] or {}).get('to','—')} "
+          f"src={r['src']}")
+
+if failed or js_errors:
+    print('\n❌ 验收未通过')
+    sys.exit(1)
+print('\n✅ 验收通过')

@@ -300,7 +300,10 @@ async function fetchYahooBars(code, range = '2y') {
   let lastErr = null;
 
   for (const host of hosts) {
-    const url = `https://${host}/v8/finance/chart/${sym}?range=${range}&interval=1d`;
+    // events=split,div：取回拆并股/分红事件。
+    // 信用残（股数）**没有**复权，1拆4 会让買残瞬间 ×4 →
+    // 必须知道窗口内是否发生拆并股，否则会把股数变化误判成「買残激增」。
+    const url = `https://${host}/v8/finance/chart/${sym}?range=${range}&interval=1d&events=split%2Cdiv`;
     try {
       const raw = await fetchViaProxy(url, { timeout: 45000, retries: 1 });
 
@@ -337,13 +340,45 @@ async function fetchYahooBars(code, range = '2y') {
           vol: vols[i] != null ? vols[i] : null,              // 成交量，用于「買残消化日数」
         });
       });
-      if (bars.length) return bars;
+      if (bars.length) {
+        // ---- 拆并股事件（issue 3）----
+        // 挂在数组属性上（不混入元素），供 detectCorporateAction 消费。
+        // known=true 表示「事件数据已成功取回」；取不到时 known=false，
+        // 上游会退到 fail-safe 特征检测，而不是假装没有公司行动。
+        bars.__splits = extractSplits(r.events);
+        bars.__splitsKnown = !!r.events;
+        return bars;
+      }
       throw new Error('空数据');
     } catch (e) {
       lastErr = e;
     }
   }
   throw lastErr || new Error('Yahoo 日线获取失败');
+}
+
+/** 从 Yahoo chart 响应里提取拆并股事件 → [{date, ratio}] */
+function extractSplits(events) {
+  const out = [];
+  const src = events && events.splits;
+  if (!src) return out;
+  for (const k of Object.keys(src)) {
+    const s = src[k];
+    const ts = (s && (s.date != null ? s.date : s[k])) || Number(k);
+    if (!Number.isFinite(ts)) continue;
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) continue;
+    const ratio = s && s.splitRatio
+      ? s.splitRatio
+      : (s && s.numerator && s.denominator ? `${s.numerator}:${s.denominator}` : null);
+    out.push({
+      date: `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`,
+      ratio: ratio,
+      numerator: s ? s.numerator : null,
+      denominator: s ? s.denominator : null,
+    });
+  }
+  return out;
 }
 
 /** 取得 EPS / BPS：有 J-Quants key 用财报，否则由 现价÷现值PER/PBR 反推 */
@@ -559,6 +594,7 @@ window.MA = {
   fetchEpsBps,
   valuationRange,
   priceTargets,
+  extractSplits,
   normDate,
   shortMD,
 };
