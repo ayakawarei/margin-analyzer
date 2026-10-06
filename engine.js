@@ -320,15 +320,21 @@ async function fetchYahooBars(code, range = '2y') {
 
       const q = r.indicators?.quote?.[0] || {};
       const closes = q.close || [], vols = q.volume || [];
+      // 复权价：Yahoo 的 `close` 已是「分割复权」价（分割不跳变），
+      // 但未做「分红复权」（除息日仍会跳空 1~3%）。
+      // `adjclose` 是「分割+分红」完全复权价，用于算变化率/四象限才无任何跳变。
+      const adjArr = r.indicators?.adjclose?.[0]?.adjclose || null;
       const bars = [];
       r.timestamp.forEach((ts, i) => {
         const c = closes[i];
         if (c == null) return;
         const d = new Date(ts * 1000);
+        const adj = adjArr ? adjArr[i] : null;
         bars.push({
           date: `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`,
-          close: c,
-          vol: vols[i] != null ? vols[i] : null,   // 成交量，用于「買残消化日数」
+          close: c,                                          // 实际收盘价（分割复权，用于当前价兜底显示）
+          adjClose: adj != null ? adj : c,                    // 完全复权价（分割+分红，用于变化率/四象限）
+          vol: vols[i] != null ? vols[i] : null,              // 成交量，用于「買残消化日数」
         });
       });
       if (bars.length) return bars;
@@ -370,29 +376,6 @@ async function fetchEpsBps(code, apiKey) {
 /* =========================================================================
  * 3. 指标计算
  * ========================================================================= */
-
-/** 最近 n 期（周）平均信用倍率 —— 对应截图「2年レンジ」 */
-function statsOfRatio(rows, key = 'ratio') {
-  const vals = rows.map((r) => r[key]).filter((v) => v != null && v > 0);
-  if (!vals.length) return null;
-  return {
-    min: Math.min(...vals),
-    max: Math.max(...vals),
-    latest: vals[vals.length - 1],
-    first: vals[0],
-    count: vals.length,
-  };
-}
-
-/** 近 n 期的「13週前比」（买/卖残相对变化率） */
-function weekOverWeek(rows, field, weeks = 13) {
-  if (rows.length < 2) return null;
-  const last = rows[rows.length - 1][field];
-  const idx = Math.max(0, rows.length - 1 - weeks);
-  const prev = rows[idx][field];
-  if (last == null || prev == null || prev === 0) return null;
-  return +(((last - prev) / prev) * 100).toFixed(1);
-}
 
 /**
  * PER / PBR 的「最低・現在・最高」区间。
@@ -569,86 +552,7 @@ function priceTargets(val, qt) {
   return out;
 }
 
-/** 一次性拉全 */
-async function analyze(code, apiKey) {
-  code = String(code).trim().replace(/[^0-9]/g, '').slice(0, 4);
-  if (!/^\d{4}$/.test(code)) throw new Error('请输入 4 位日股代码，例如 7974');
-
-  const [val, rows] = await Promise.all([
-    fetchValuation(code),
-    fetchMarginSeries(code),
-  ]);
-
-  // 主页面（精简 markdown）常缺 股价/名称，改从 short_positions 页补齐
-  try {
-    const md2 = await fetchViaProxy(`https://ganan-finance.com/${code}/short_positions`);
-    if (val.price == null) {
-      const pm =
-        md2.match(/##\s*株価:?\s*\[?([\d,]+)\s*円/) ||
-        md2.match(/株価:?\s*\[?([\d,]+)\s*円/) ||
-        md2.match(/株価[^\d\n]{0,12}([\d,]{3,})\s*円/);
-      if (pm) val.price = NUM(pm[1]);
-    }
-    if (!val.name) {
-      const t1 = md2.match(/Title:\s*\d{4}\s*([^\n【]+)/);
-      if (t1) val.name = t1[1].trim();
-    }
-    if (val.mcap == null) {
-      const mm = md2.match(/時価総額[^|\n]*\|[^|\n]*\|[^|\n]*\|\s*([\d,]+)/);
-      if (mm) val.mcap = NUM(mm[1]);
-    }
-  } catch (e) { /* 补充信息失败不阻断 */ }
-
-  // 行情 + EPS/BPS（与信用残并行，失败不阻断主流程）
-  let bars = null, eb = null;
-  try {
-    [bars, eb] = await Promise.all([
-      fetchYahooBars(code, '2y'),
-      fetchEpsBps(code, apiKey),
-    ]);
-  } catch (e) { /* 保持 null，走估算 */ }
-
-  // 无财报时用 现价÷现值PER/PBR 反推 EPS / BPS
-  let eps = eb && eb.eps;
-  let bps = eb && eb.bps;
-  if (!eps && val.price && val.perFcst) eps = val.price / val.perFcst;
-  if (!bps && val.price && val.pbrResult) bps = val.price / val.pbrResult;
-
-  const qt = { bars, eps, bps };
-
-  // 股价兜底：Ganan 部分标的页面不显示股价，用 Yahoo 最新收盘价补齐
-  if (val.price == null && bars && bars.length) {
-    val.price = bars[bars.length - 1].close;
-    val.priceSource = 'Yahoo 最新收盘';
-  }
-
-  const vr = valuationRange(val, qt);
-  const pt = priceTargets(val, qt);
-
-  const ratioStats = statsOfRatio(rows);
-  const last = rows[rows.length - 1] || null;
-
-  return {
-    code,
-    val,
-    rows,
-    last,
-    ratioStats,
-    weekOverWeek: {
-      buy: weekOverWeek(rows, 'buy'),
-      sell: weekOverWeek(rows, 'sell'),
-    },
-    vr,
-    pt,
-    barsN: bars ? bars.length : 0,
-    hasBars: !!(bars && bars.length),
-    hasJq: !!(eb && eb.source === 'J-Quants 财报'),
-    epsSource: (eb && eb.source) || '由 现价÷PER/PBR 反推',
-  };
-}
-
 window.MA = {
-  analyze,
   fetchMarginSeries,
   fetchValuation,
   fetchYahooBars,

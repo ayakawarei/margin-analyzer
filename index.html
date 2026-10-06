@@ -229,6 +229,30 @@
   .heroWhy{font-size:13px;line-height:1.65;color:var(--txt)}
   .heroWhy .q{color:var(--sub)}
 
+  /* 信用ポジション：只用文字档位，不给数字（首页不暴露内部评分） */
+  .heroPos{font-size:11.5px;color:var(--sub);margin:-2px 0 5px}
+  .heroPos b{font-size:13px;font-weight:700}
+
+  /* ===== 折叠区（判定ロジック等，默认收起） ===== */
+  .fold summary{cursor:pointer;font-size:12px;color:var(--buy);padding:6px 10px;
+    border:1px dashed rgba(74,125,255,.4);border-radius:7px;list-style:none;
+    user-select:none;transition:background .15s}
+  .fold summary::-webkit-details-marker{display:none}
+  .fold summary::before{content:'▸ ';display:inline-block;transition:transform .15s}
+  .fold[open] summary::before{content:'▾ '}
+  .fold summary:hover{background:rgba(74,125,255,.09)}
+  .fold[open] summary{margin-bottom:9px;border-style:solid}
+  .fold>div:last-child{}
+
+  /* 判定ロジック内部的小标题 */
+  .whyHd{font-size:11px;color:var(--sub);margin:0 0 4px;font-weight:600}
+
+  /* 被排除的估值信号：视觉上明确「不计入」 */
+  .vwhy .r.excluded{border-color:var(--ratio);background:rgba(176,108,255,.06)}
+  .vwhy .r.excluded b{color:var(--ratio)}
+  .exnote{color:var(--sub);font-size:10.5px}
+  .exnote b{color:var(--sell)}
+
   /* ---- 方向 / 残量 两行事实 ---- */
   .facts{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
   @media(max-width:640px){.facts{grid-template-columns:1fr}}
@@ -349,11 +373,12 @@
     </div>
     <div class="heroR">
       <div class="heroBadge" id="hBadge">読み込み中…</div>
+      <div class="heroPos" id="hPos"></div>
       <div class="heroWhy" id="hWhy"></div>
     </div>
   </div>
 
-  <!-- 方向 vs 残量（Hero 下的两行事实） -->
+  <!-- 方向 vs 残量（Hero 下的两行事实，各只出现一次） -->
   <div class="facts" id="hFacts"></div>
 
   <!-- 3 个核心指标（禁止更多） -->
@@ -361,7 +386,7 @@
     <div class="kpi"><div class="k">読み込み中</div><div class="v">—</div></div>
   </div>
 
-  <!-- 図表：株価 × 信用買残（默认变化率） -->
+  <!-- 唯一的图：株価 × 信用買残（默认变化率 / 单 Y 轴） -->
   <div class="card">
     <h3>株価 × 信用買残
       <span style="display:inline-flex;gap:4px;margin-left:auto">
@@ -370,7 +395,6 @@
       </span>
     </h3>
     <div id="c4" class="chart" style="height:190px"></div>
-    <div class="delta" id="c4delta"></div>
   </div>
 
   <!-- 注目 -->
@@ -398,28 +422,38 @@
     </table>
   </div>
 
+  <!-- 3. 買残消化日数详细计算（放在指标总览之前，先讲清主口径怎么来的） -->
+  <div class="card">
+    <h3>消化日数の計算過程<small>可追溯到原始字段</small></h3>
+    <div id="digestCalc" class="kv"></div>
+  </div>
+
+  <!-- 4. 上場比 / 発行済比 详细（含分母稳定性审计） -->
+  <div class="card">
+    <h3>上場比 / 発行済比 の詳細<small>分母口径与稳定性</small></h3>
+    <div id="listedCalc" class="kv"></div>
+  </div>
+
+  <!-- 信用需給核心指标总览 -->
   <div class="card">
     <h3>信用需給核心指标<small>倍率・消化日数・上場比・残量変化・股价×买残四象限</small></h3>
     <div id="indBox"><div class="empty">等待数据…</div></div>
     <div id="quadBox"></div>
   </div>
 
-  <!-- 评分内部贡献（首页已隐藏） -->
-  <div class="card" id="verdictCard">
-    <h3>评分内部贡献<small>方向 / 信用风险 及其触发规则 —— 首页不展示</small></h3>
-    <div id="verdictBox"><div class="empty">等待数据…</div></div>
-  </div>
-
-  <!-- 异常检测 -->
+  <!-- 5. データ品質 / 異常検知 -->
   <div class="card" id="anomCard">
-    <h3>异常检测<small id="anomSub" style="font-weight:400"></small></h3>
+    <h3>データ品質・異常検知<small id="anomSub" style="font-weight:400"></small></h3>
     <div id="anomBox"><div class="empty">等待数据…</div></div>
   </div>
 
-  <!-- 消化日数计算过程 -->
-  <div class="card">
-    <h3>消化日数の計算過程<small>可追溯到原始字段</small></h3>
-    <div id="digestCalc" class="kv"></div>
+  <!-- 6. 判定ロジック（默认折叠 —— 首页不展示，怀疑结论时才来审计） -->
+  <div class="card" id="verdictCard">
+    <h3>この判定になった理由<small>判定ロジック（点击展开）</small></h3>
+    <details class="fold">
+      <summary>展开查看内部评分与触发规则</summary>
+      <div id="verdictBox"><div class="empty">等待数据…</div></div>
+    </details>
   </div>
 
   <!-- 数据来源 -->
@@ -435,19 +469,30 @@
     </div>
   </div>
 
-  <!-- 計算公式 -->
+  <!-- 7. 計算公式 -->
   <div class="card">
     <h3>計算公式・口径</h3>
     <div class="formula">
       <div><b>信用倍率</b> = 信用買残 ÷ 信用売残</div>
       <div><b>買残消化日数</b> = 信用買残 ÷ 20日平均出来高<br>
         <span class="na">评级：&lt;0.5軽／0.5~1正常／1~3注意／3~5偏重／&gt;5混雑</span></div>
-      <div><b>買残 / 発行済株式数</b> = 上場比（JPX 官方口径，分母为発行済株式数）</div>
+      <div><b>買残 / 発行済株式数</b> = 信用買残 ÷ 発行済株式数 × 100<br>
+        <span class="na">主口径分母＝Ganan 発行済株式数。JPX「上場比」分母为上場株式数，两者口径不同，不可混用</span></div>
       <div><b>株価 × 買残 四象限</b>：股价与买残同向=顺行／反向=背离<br>
         <span class="na">阈值：股价 ±0.5%，买残 ±1.0%</span></div>
-      <div><b>方向（-100~+100）</b>：由四象限与估值水平决定</div>
-      <div><b>信用リスク（0~100）</b>：由消化日数、下落中买残增加、売残激增等绝对量指标决定<br>
+      <div><b>信用需給の等級</b>（改善 / 中立 / 注意 / 悪化）＝ 由消化日数、
+        発行済比、四象限、信用倍率等<b>信用需給相关的指标</b>综合定级</div>
+      <div><b>内部スコア（方向 -100~+100／信用リスク 0~100）</b>：仅在
+        「この判定になった理由」折叠区内可见，<b>首页不展示</b><br>
         <span class="na">信用风险高 ≠ 股价必跌，两者为独立维度</span></div>
+      <div style="margin-top:6px;padding:6px 9px;border-left:2.5px solid var(--ratio);
+        background:rgba(176,108,255,.07);border-radius:0 5px 5px 0">
+        <b style="color:var(--ratio)">信用需給 与 估值 严格分离</b><br>
+        信用需給只使用：株価×信用買残方向・信用買残变化・信用売残变化・
+        買残消化日数・買残/発行済比・信用倍率。<br>
+        <b>PER / PBR / EPS / BPS / 配当 / 估值区间 一律不参与信用需給评分</b>
+        —— 估值高不等于信用需給差。
+      </div>
     </div>
   </div>
 
@@ -552,7 +597,11 @@ function setStatus(type, html){
   $('status').innerHTML = type ? `<div class="status ${type}">${html}</div>` : '';
 }
 
+// 请求序号：防止快速连续搜索（7974→6920→4519）时旧请求覆盖新请求
+let __runSeq = 0;
+
 async function run(forceFresh){
+  const mySeq = ++__runSeq;
   // JPX 新代码段为「数字+字母」（如 285A 铠侠 / 130A），必须保留字母。
   // 之前用 replace(/\D/g,'') 会把 A 删掉变成 285，导致查不到。
   const code = $('inp').value.trim().toUpperCase()
@@ -570,24 +619,31 @@ async function run(forceFresh){
   const valP = MA.fetchValuation(code).catch(() => null);
   const margP = (async () => {
     if (SRC_MODE === 'ganan') return { rows: await MA.fetchMarginSeries(code), src: 'ganan' };
-    if (LOCAL_OK === null) LOCAL_OK = await MA_OFFICIAL.pingLocal();
-    if (SRC_MODE === 'official' || (SRC_MODE === 'auto' && LOCAL_OK)) {
+    // ping 只用于决定「要不要提示用户启动 server.py」，**不再**作为
+    // 是否走官方通道的开关。旧逻辑把 ping 结果缓存进 LOCAL_OK，
+    // 一次抖动就让整页降级到 Ganan（而 Ganan 常常无数据 → 整页报「信用残数据为空」）。
+    if (LOCAL_OK === null) {
+      LOCAL_OK = await MA_OFFICIAL.pingLocal().catch(() => false);
+    }
+    if (SRC_MODE === 'official' || SRC_MODE === 'auto') {
       try {
         let j = null, lastErr = null;
-        // 首次访问某代码时服务端要解析多个 PDF，可能瞬时返回空/超时，做有限重试
+        // 首次访问某代码时服务端要解析多个 PDF，可能瞬时返回空/超时，做有限重试。
+        // 始终重试 3 次：官方通道不再依赖 ping 结果（ping 只用于提示文案），
+        // 且 server.py 已改为 ThreadingHTTPServer，健康检查不会被解析阻塞。
         for (let a = 0; a < 3; a++) {
           try {
             j = await MA_OFFICIAL.fetchOfficialDaily(code, 15, a === 0 ? !!forceFresh : true);
             if (j && j.rows && j.rows.length) break;
             lastErr = new Error('本地服务返回空数据（PDF 解析中）');
           } catch (e) { lastErr = e; }
-          await new Promise(function(r){ setTimeout(r, 2500 * (a + 1)); });
+          if (a < 2) await new Promise(function(r){ setTimeout(r, 2500 * (a + 1)); });
         }
         if (!j || !j.rows || !j.rows.length) throw lastErr || new Error('信用残数据为空');
         return { rows: officialRows(j), src: 'official', name: j.name };
       } catch (e) {
         if (SRC_MODE === 'official') throw e;   // 显式选择官方源时如实报错
-        // auto 模式静默回退
+        // auto 模式静默回退（官方真的不可用，例如 server.py 没启动）
       }
     }
     return { rows: await MA.fetchMarginSeries(code), src: 'ganan' };
@@ -595,9 +651,11 @@ async function run(forceFresh){
 
   try{
     const [val, marg] = await Promise.all([valP, margP]);
+    if (mySeq !== __runSeq) return;   // 已有更新请求，丢弃本次结果
     if (!val && !marg.rows.length) throw new Error('未取得任何数据');
 
     const d = await buildAnalysis(code, val || {code}, marg.rows);
+    if (mySeq !== __runSeq) return;   // buildAnalysis 期间又触发了新请求
 
     // 补齐名称
     if (marg.name && !d.val.name) d.val.name = marg.name;
@@ -612,7 +670,7 @@ async function run(forceFresh){
     const last = d.last ? d.last.date : '—';
     if (marg.src === 'official') {
       // 首页只保留「哪一天的数据」，公表时刻等说明在详细页
-      setStatus('ok', '✅ JPX日次　最新 <b>'+last+'</b>　'+d.rows.length+'期');
+      setStatus('ok', '✅ JPX日次最新 <b>'+last+'</b>　'+d.rows.length+'期');
     } else {
       setStatus('warn', '⚠️ 当前为 <b>Ganan 周次</b>数据（截至 '+last+
         '）。要每日更新请在同目录运行 <code>python3 server.py</code> 后重试。');
@@ -626,7 +684,9 @@ async function run(forceFresh){
 
 /** 复用引擎的计算逻辑，接收外部传入的信用残行 */
 async function buildAnalysis(code, val, rows){
-  rows = (rows||[]).filter(r => r.buy!=null && r.sell!=null && r.sell>0)
+  // 只过滤「买残缺失/为 0」的行；卖残=0 是合法的（无融券余额），
+  // 此时倍率为 null，前端显示「—」，不应丢弃该标的。
+  rows = (rows||[]).filter(r => r.buy!=null && r.buy>0)
                    .sort((a,b)=>a.date.localeCompare(b.date));
   if (!rows.length) throw new Error('信用残数据为空');
 
@@ -660,9 +720,11 @@ async function buildAnalysis(code, val, rows){
   const qt = { bars, eps, bps };
 
   // ---- 把股价按日期对齐到信用残行，供四象限判断使用 ----
-  // Yahoo 的 date 是 UTC，与 JPX 的日本日期可能差一天，故同时接受 ±1 天匹配。
+  // 关键：四象限比较的是「股价变化方向」，必须用 adjClose（分割+分红完全复权），
+  // 否则分割/除息会制造假跳变，误判方向。当前价显示则用 close（实际价）。
+  // Yahoo 的 date 是 UTC（实际=JST 交易日），已用 getUTC 正确取到，无需 ±1 容错。
   const priceByDate = new Map();
-  if (bars) for (const b of bars) priceByDate.set(b.date, b.close);
+  if (bars) for (const b of bars) priceByDate.set(b.date, b.adjClose != null ? b.adjClose : b.close);
   const pickPrice = (d) => {
     if (priceByDate.has(d)) return priceByDate.get(d);
     const t = new Date(d + 'T00:00:00Z').getTime();
@@ -696,8 +758,10 @@ async function buildAnalysis(code, val, rows){
   })();
   val.priceChgAligned = priceChgN;
   if (bars && bars.length > 6) {
-    val.priceChg5 = +(((bars[bars.length-1].close - bars[bars.length-6].close)
-      / bars[bars.length-6].close) * 100).toFixed(1);
+    // 5 期股价变化用 adjClose（复权），避免分割/除息跳变污染
+    const cA = bars[bars.length-1].adjClose != null ? bars[bars.length-1].adjClose : bars[bars.length-1].close;
+    const cB = bars[bars.length-6].adjClose != null ? bars[bars.length-6].adjClose : bars[bars.length-6].close;
+    val.priceChg5 = cB ? +(((cA - cB) / cB) * 100).toFixed(1) : null;
   }
 
   // 7 类指标 + 异常检测 + 规则引擎
@@ -708,7 +772,17 @@ async function buildAnalysis(code, val, rows){
     lastMarginDate: last.date,
   });
   const anomalies = MA2.detectAnomalies(rows, ind, val);
-  const verdict = MA2.runRules(ind, val);
+  const rules = MA2.runRules(ind, val);
+
+  // 首页只消费 creditVerdict（等级 + 命中率文字），内部 0~100 分不外泄。
+  // verdictAudit 仅供详细页「判定ロジック」折叠区审计使用。
+  const cv = MA2.creditVerdict(ind, rules);
+  const verdict = {
+    grade: cv.grade, emoji: cv.emoji, label: cv.label,
+    color: cv.color, bg: cv.bg, badge: cv.badge, suffix: cv.suffix,
+    position: cv.position,
+    audit: MA2.verdictAudit(ind, rules, val),
+  };
 
   return {
     code, val, rows, last, ind, anomalies, verdict,
@@ -754,60 +828,59 @@ function render(d){
 }
 
 /* ================================================================
- * Tab 概要 —— 5 秒回答 4 个问题
+ * Tab 概要 —— 5 秒看懂
+ * -----------------------------------------------------------------
+ * 严格的信息层级（用户 2026-10-06 要求）：
+ *   1. 股票名 / 代码 / 当前股价
+ *   2. 信用需給总判断（只给等级，不给 0~100 分）
+ *   3. 信用残同期股价 + 信用買残（各只出现一次）
+ *   4. 三个核心 KPI
+ *   5. 一句结论
+ *   6. 👀 注目
+ *   + 股价 × 信用買残 单图（初日=100，共用单 Y 轴）
+ *
+ * 「同一个事实在首页只出现一次」：
+ *   - 买残增减 → 只在 facts 行出现一次；结论句用「需給形态」措辞，不重复百分比
+ *   - 内部评分 / 触发规则 → 全部下沉到详细页「判定ロジック」折叠区
  * ================================================================ */
 function renderHero(d){
   const i = d.ind, v = d.val, q = i.quadrant;
 
   /* --- ① 信用需給：好还是坏 ---
-     判定只看「方向 + 风险」两个已算好的分数，规则集中在此处，便于调整。*/
-  const dir = d.verdict.dir, risk = d.verdict.risk;
-  // 「短期信用需給」= 方向 + 绝对量。
-  // 红色只留给「绝对量真的重」（消化日数 >=3日 或 信用风险 >=65）；
-  // 仅方向性恶化（股价跌+买残增）而仓位不重时，用橙色「やや悪化」——
-  // 否则用户会误以为「仓位已非常危险」，与下方 1.23日/0.70% 的事实矛盾。
-  // 「絶対量」= 消化日数（仓位相对成交量）—— 这是仓位是否真的重的唯一尺度。
-  // 「方向」= 股价与买残的组合。
-  // 两者分开定级，避免「红色徽章 + 三个绿色 KPI」的自相矛盾：
-  //   · 绝对量重 → 才有资格用红
-  //   · 只是方向差/涨得太急 → 橙或黄，并在徽章后缀里点明原因
-  // 绝对量是否真的重，只看消化日数。
-  // risk 里混有「買残急剧增加」这种速度信号，若并入绝对量判定，
-  // 会出现「0.55 日消化却报红」的自相矛盾。
-  const absHeavyReal = (i.digest.days!=null && i.digest.days >= 3);
-  const absOK     = (i.digest.days!=null && i.digest.days < 1.5);
-  // 追高型：仓位不重但短期暴涨（買残 4 期 +100% 以上）
-  const chasing   = (i.long.chgN!=null && i.long.chgN > 100) && absOK;
-  let grade, gcolor, gbg;
-  if (absHeavyReal)               { grade = '🔴 短期信用需給：悪化';       gcolor = '#ff5a6e'; gbg = 'rgba(255,90,110,.12)'; }
-  else if (chasing)                { grade = '🟠 短期信用需給：要注意な急騰'; gcolor = '#f5a524'; gbg = 'rgba(245,165,36,.12)'; }
-  else if (dir < -20)              { grade = '🟠 短期信用需給：やや悪化'; gcolor = '#f5a524'; gbg = 'rgba(245,165,36,.12)'; }
-  else if (dir < -5 || risk >= 55) { grade = '🟡 短期信用需給：警戒';     gcolor = '#fbbf24'; gbg = 'rgba(251,191,36,.12)'; }
-  else if (dir >= 10 && risk < 45) { grade = '🟢 短期信用需給：改善';     gcolor = '#22c55e'; gbg = 'rgba(34,197,94,.12)'; }
-  else                            { grade = '🟡 短期信用需給：中立';     gcolor = '#fbbf24'; gbg = 'rgba(251,191,36,.12)'; }
+     只显示最终等级（改善/中立/注意/悪化）。
+     等级由 MA2.creditVerdict 统一计算，首页不做任何二次判定，
+     也不展示 dir/risk 这两个 0~100 内部量。 */
+  const cv = d.verdict;
 
   const badge = $('hBadge');
-  badge.textContent = grade;
-  badge.style.color = gcolor;
-  badge.style.background = gbg;
+  badge.textContent = cv.badge + (cv.suffix || '');
+  badge.style.color = cv.color;
+  badge.style.background = cv.bg;
 
-  /* --- 株価（顶部显示「现在株価」，不含同期涨幅） --- */
+  /* --- ② 信用ポジション（仓位轻重，不给数字） ---
+     只在与 KPI「买残轻重」不重复的前提下作为一句补充标签。
+     它回答的是「仓位在光谱里的位置」，KPI 回答的是「具体多少日/多少%」。 */
+  const pos = $('hPos');
+  if (pos) {
+    pos.innerHTML = '信用ポジション：<b style="color:' + cv.position.color + '">' +
+                    cv.position.label + '</b>';
+  }
+
+  /* --- ③ 股价（顶部只显示「现在株価」，不含任何涨幅） --- */
   const pxEl = $('hPx');
   pxEl.textContent = v.price!=null ? v.price.toLocaleString() : '—';
-  // 顶部涨幅位清空：+15.3% 那种是「与信用残同期比较」，不是现价当日涨跌，
-  // 挂在「现在株価」旁会误导用户。
   const chgEl = $('hPxChg');
   chgEl.textContent = '';
   chgEl.style.color = 'var(--sub)';
-  // 信用残同期股价变化（用于 facts 卡）
-  const pc = q.priceChg!=null ? q.priceChg : (d.val.priceChgAligned!=null?d.val.priceChgAligned:null);
 
-  /* --- ② 为什么：最多 2 行解释（由已算好的四象限/消化日数/倍率拆解生成） --- */
-  $('hWhy').innerHTML = buildWhy(d, grade);
+  const pc = q.priceChg!=null ? q.priceChg
+            : (d.val.priceChgAligned!=null ? d.val.priceChgAligned : null);
 
-  /* --- 方向与残量（两个事实，各出现一次） --- */
-  const bc = i.long.chgN, sc = i.short.chgN;
-  // 同期股价的日期范围（与信用残同范围比较）
+  /* --- ④ 一句结论（≤40字，不重复上面已出现的百分比） --- */
+  $('hWhy').innerHTML = buildWhy(d);
+
+  /* --- ⑤ 方向 vs 残量：两个事实，各只出现一次 --- */
+  const bc = i.long.chgN;
   const dRange = (d.rows && d.rows.length >= 2)
     ? MA.shortMD(d.rows[0].date) + ' → ' + MA.shortMD(d.rows[d.rows.length - 1].date)
     : '';
@@ -817,18 +890,18 @@ function renderHero(d){
       '<span class="fv">'+(pc!=null?(pc>0?'+':'')+pc+'%':'—')+'</span>'+
       '<span class="fa" style="color:'+(pc>0?'var(--sell)':'var(--buy)')+'">'+
         (pc>0?'↗ 上昇':(pc<0?'↘ 下落':'→ 横ばい'))+'</span></div>'+
-    '<div class="fact"><span class="fl">信用買残</span>'+
+    '<div class="fact"><span class="fl">信用買残'+
+        (d.rows.length>1?' <small class="frange">'+d.rows.length+'期</small>':'')+'</span>'+
       '<span class="fv">'+(bc!=null?(bc>0?'+':'')+bc+'%':'—')+'</span>'+
       '<span class="fa" style="color:'+(bc>0?'var(--sell)':'var(--buy)')+'">'+
         (bc>0?'↗ 増加':(bc<0?'↘ 減少':'→ 横ばい'))+'</span></div>';
 
-  /* --- ③ 买残到底重不重：只 3 个核心指标 --- */
+  /* --- ⑥ 买残到底重不重：只 3 个核心指标 --- */
   const dg = i.digest, bl = i.borrowRate;
   const lvColor = (lvl) => lvl==='ok' ? 'var(--ok)' : (lvl==='warn' ? 'var(--warn)' : 'var(--sell)');
   const emoji = (lvl) => lvl==='ok' ? '🟢' : (lvl==='warn' ? '🟡' : '🔴');
 
-  // 倍率评级：用「绝对倍率水平」（与区间位置、消化日数彻底分离）。
-  // 之前把「区间位置/消化日数」混入评级，导致 1.73 倍也被判「高め」。
+  // 倍率评级：用「绝对倍率水平」（与区间位置、消化日数彻底分离）
   const ratioAbs = (i.ratio && i.ratio.absoluteLevel)
     ? i.ratio.absoluteLevel : MA2.absoluteRatioLevel(i.ratio && i.ratio.value);
   const ratioLv = ratioAbs.label, ratioColor = ratioAbs.color, ratioEmoji = ratioAbs.emoji;
@@ -836,54 +909,75 @@ function renderHero(d){
   const ratioCaveat = (i.ratioDecomp && i.ratioDecomp.cause === 'shortTiny')
     ? '売残极少のため偏高' : '';
 
-  // 発行済比の重み付け
   const listedPct = bl.buyListed;
   let listedLv = '—', listedColor = 'var(--sub)';
   if (listedPct!=null){
-    if (listedPct >= 10)      { listedLv = '重い';   listedColor = 'var(--sell)'; }
+    if (listedPct >= 10)      { listedLv = '重い';     listedColor = 'var(--sell)'; }
     else if (listedPct >= 3)  { listedLv = 'やや重い'; listedColor = 'var(--warn)'; }
-    else                      { listedLv = '軽い';   listedColor = 'var(--ok)'; }
+    else                      { listedLv = '軽い';     listedColor = 'var(--ok)'; }
   }
 
   $('hKpis').innerHTML =
     kpiCard('買残消化日数',
       dg.days!=null ? dg.days.toFixed(2)+'<small>日</small>' : '—',
-      dg.label||'—', dg.level ? emoji(dg.level)+' '+dg.label : '—', lvColor(dg.level),
+      dg.level ? emoji(dg.level)+' '+(dg.label||'—') : '—', lvColor(dg.level),
       dg.days!=null ? (dg.period+'日均量基準' + (dg.fallback ? '（降格）' : '')) : '') +
     kpiCard('買残 / 発行済株式数',
       listedPct!=null ? listedPct.toFixed(2)+'<small>%</small>' : '—',
-      listedLv, listedLv!=='—' ? (listedLv==='軽い'?'🟢 ':(listedLv==='やや重い'?'🟡 ':'🔴 '))+listedLv : '',
+      listedLv!=='—' ? (listedLv==='軽い'?'🟢 ':(listedLv==='やや重い'?'🟡 ':'🔴 '))+listedLv : '',
       listedColor, '分母＝発行済株式数') +
     kpiCard('信用倍率',
       i.ratio.value!=null ? i.ratio.value.toFixed(2)+'<small>倍</small>' : '—',
-      ratioLv, ratioEmoji+' '+ratioLv, ratioColor,
-      ratioCaveat);
+      ratioEmoji+' '+ratioLv, ratioColor, ratioCaveat);
 
-  /* --- ④ 下一步观察什么 --- */
+  /* --- ⑦ 下一步观察什么 --- */
   const w = buildWatch(d);
   $('hWatchB').innerHTML = '<ul>'+w.map(x=>'<li>'+x+'</li>').join('')+'</ul>';
   $('hWatch').style.display = 'block';
 }
 
-function kpiCard(k, v, lv, lvTxt, color, sub){
+/* KPI 卡：k=名称 / v=数值 / lvTxt=等级文字 / color=等级色 / sub=补充说明 */
+function kpiCard(k, v, lvTxt, color, sub){
   return '<div class="kpi"><div class="k">'+k+'</div>'+
     '<div class="v">'+v+'</div>'+
-    '<div class="lv" style="color:'+(color||'var(--sub')+'">'+lvTxt+'</div>'+
+    '<div class="lv" style="color:'+(color||'var(--sub)')+'">'+(lvTxt||'')+'</div>'+
     (sub?'<div class="sub">'+sub+'</div>':'')+'</div>';
 }
 
-/** 生成 ≤2 行解释（规则引擎，文本基于已算好的指标） */
-function buildWhy(d, grade){
-  // 首页只给 1 句、≤40 字。绝对量与倍率的详细拆解下沉到「信用残詳細」。
+/** 一句结论（≤45字）
+ *  纪律：不复述首页已出现的百分比（股价涨跌、買残涨跌），
+ *  只解释「需給形态」+「绝对量轻重」，避免同一事实出现两次。 */
+function buildWhy(d){
   const i = d.ind, q = i.quadrant, dg = i.digest;
   const light = dg.days!=null && dg.days < 1.5;
+  // 形态措辞（不含数字，数字已在 facts / KPI 出现）
+  const shape = {
+    strong        : '株価上昇中に買残が減少',
+    deleverage    : '株価下落と信用整理が進行',
+    chasing       : '上昇局面で買残が積み上がり',
+    accumulateDown: '株価下落中に買残が増加',
+    marginBuildFlat : '株価横ばいだが買残が増加',
+    marginDeclineFlat : '株価横ばいで買残が減少',
+    priceMoveOnly : '株価のみ動いている',
+    flat          : '株価・買残ともに横ばい',
+    unknown       : '株価または信用残の推移が短い',
+  }[q.key] || '株価と買残の向きに規則性がない';
+  // 轻重措辞
+  const weight = light ? '買残の絶対量は重くない'
+    : (dg.days!=null ? '買残は消化に数日かかる水準' : '買残の絶対量は算出できた');
+  // 结论落点（对应等级，不再引入新的数字）
   const tail = {
-    accumulateDown : '株価下落中に買残が増加。短期需給はやや悪化。',
-    strong        : '株価上昇中に買残が減少。需給は改善傾向。',
-    chasing       : '上昇局面で買残が積み上がっています。',
-    deleverage    : '株価下落と信用整理が進行しています。',
-  }[q.key] || '株価と買残の向きに規則性なし。';
-  return (light ? '買残の絶対量は重くないが、' : '買残は'+ (dg.days!=null?dg.days.toFixed(1)+'日分':'相当') +'の水準で、') + tail;
+    strong: '短期需給は改善傾向',
+    deleverage: '売り圧の消化が進行',
+    marginDeclineFlat: '需給は改善傾向',
+    marginBuildFlat: '需給の悪化余地',
+    chasing: '上昇に伴う追高に注意',
+    accumulateDown: '短期需給は悪化',
+    priceMoveOnly: '信用面の変化は小さい',
+    flat: '方向性の読み取り材料が不足',
+    unknown: '判定材料が不足',
+  }[q.key] || '';
+  return shape + '。<br>' + weight + '、' + tail + '。';
 }
 
 /** ④ 下一步观察什么 */
@@ -935,7 +1029,58 @@ function renderDetail(d){
   renderAnomalies(d);
   renderVerdict(d);
   renderDigestCalc(d);
+  renderListedCalc(d);
   renderDataSrc(d);
+}
+
+/** 上場比 / 発行済比 详细（含分母口径与稳定性审计）
+ *  首页 KPI 只给一个数字；这里回答「这个分母是谁、可不可信」。 */
+function renderListedCalc(d){
+  const bl = d.ind.borrowRate, last = d.last||{};
+  let s = '';
+
+  s += krow('信用買残（分子）', last.buy!=null ? last.buy.toLocaleString()+' 株' : '—');
+  s += krow('主口径分母（発行済株式数）',
+            bl.shares!=null ? bl.shares.toLocaleString()+' 株' : '—',
+            bl.shares!=null ? 'ok' : 'warn');
+  s += krow('　分母来源', bl.sharesSource||'—');
+  s += krow('計算結果（買残 / 発行済）',
+            (bl.buyListed!=null ? bl.buyListed.toFixed(2)+' %' : '—'), 'ok');
+  s += krow('　売残 / 発行済（参考）',
+            (bl.sellListed!=null ? bl.sellListed.toFixed(2)+' %' : '—'));
+
+  // JPX 上場比（不同分母，仅作交叉核对）
+  if (bl.buyListedJpx != null) {
+    s += krow('JPX 上場比（買残）',
+              bl.buyListedJpx+' %（分母＝上場株式数）');
+    s += krow('　参考：売残 / 上場株式数',
+              (bl.sellListedJpx!=null ? bl.sellListedJpx+' %' : '—'));
+  }
+
+  // 分母稳定性
+  if (bl.impliedListedShares != null) {
+    s += krow('　上場比反推の上場株式数',
+              bl.impliedListedShares.toLocaleString()+' 株');
+  }
+  if (bl.denomStable === true) {
+    s += krow('分母稳定性', '安定（発行済 vs 上場比反推 乖离 ≤20%）', 'ok');
+  } else if (bl.denomStable === false) {
+    s += krow('分母稳定性', '⚠ 乖離大 — 下列比率は参考値', 'err');
+    s += krow('　注', bl.denomNote||'—', 'warn');
+  } else if (bl.denomNote) {
+    s += krow('分母稳定性', '判定不能', 'warn');
+    s += krow('　注', bl.denomNote, 'warn');
+  }
+  if (bl.note) s += krow('注', bl.note, 'warn');
+
+  // 明确区分两套口径，避免用户把两个百分比混为一谈
+  s += '<div class="srcnote" style="margin-top:9px">'+
+    '<b>口径差异：</b>主口径「買残 / 発行済株式数」的分母是公司的全部已发行股份；'+
+    'JPX「上場比」的分母是<b>上場株式数</b>（仅上市部分）。'+
+    '两者分母不同、数值不可直接比较，小盘股差距尤其明显。'+
+    '本工具的 KPI 与信用需給评分<b>只使用主口径</b>。</div>';
+
+  $('listedCalc').innerHTML = s;
 }
 
 /** 消化日数计算过程（可追溯；20日与5日两个口径并列） */
@@ -1109,6 +1254,9 @@ function renderIndicators(d){
           '計算結果 <b>'+bl.buyListed+'%</b>'+
           (bl.buyListedJpx!=null
             ? '<br><span style="color:var(--sub)">JPX 上場比 '+bl.buyListedJpx+'%（分母=上場株式数，参考）</span>'
+            : '')+
+          (bl.denomStable === false
+            ? '<br><span style="color:var(--warn)">⚠ '+bl.denomNote+'</span>'
             : '');
   } else {
     aud = '<span class="na">'+(bl.note||'データ不足')+'</span>';
@@ -1222,54 +1370,70 @@ function renderAnomalies(d){
 }
 
 /* ================================================================
- * 规则引擎结论：方向 / 风险 双分数
+ * 判定ロジック（详细页 · 默认折叠）
+ * -----------------------------------------------------------------
+ * 内部 0~100 分数与每条规则的贡献值只在这里出现。
+ * 首页只给等级（改善/中立/注意/悪化），不显示任何数字分数。
  * ================================================================ */
 function renderVerdict(d){
-  const v = d.verdict, q = v.quadrant;
+  const a = d.verdict.audit, q = a.quadrant;
 
-  // 方向：-100~+100 → 0~100%
-  const dirPos = (v.dir + 100) / 2;
-  // 风险：0~100
-  const riskPos = v.risk;
+  // 方向：-100~+100 → 0~100%（仅用于折叠区内的仪表位置）
+  const dirPos = (a.dir + 100) / 2;
+  const riskPos = a.risk;
 
-  const rItems = v.riskHits.map(function(h){
-    return '<div class="r sell" style="border-color:'+v.riskColor+'"><b>'+
-      h.whyText+'</b></div>';
+  const ruleRow = (w, text, color) =>
+    '<div class="r" style="border-color:'+color+'"><b>'+
+    (w>0?'+'+w:String(w))+'</b>　'+text+'</div>';
+
+  const rItems = a.riskItems.map(function(h){ return ruleRow(h.w, h.text, a.riskColor); }).join('');
+  const dItems = a.dirItems.map(function(h){
+    return ruleRow(h.w, h.text, h.w>=0 ? 'var(--ok)' : 'var(--sell)');
   }).join('');
-  const dItems = v.dirHits.map(function(h){
-    return '<div class="r '+(h.zone==='up'?'buy':'sell')+'"><b>'+h.whyText+'</b></div>';
-  }).join('');
+
+  // 被排除在信用需給评分之外的估值信号（明确列出，证明「PER 不影响本结论」）
+  const vItems = a.valuationExcluded.length
+    ? a.valuationExcluded.map(function(h){
+        return '<div class="r excluded"><b>'+h.label+'</b>　'+h.text+
+               '<br><span class="exnote">↑ 估值指标：<b>不参与</b>信用需給评分</span></div>';
+      }).join('')
+    : '<div class="r excluded" style="border-color:var(--sub)">'+
+      '当前无触发的估值信号（PER / 配当利回り）。<br>'+
+      '<span class="exnote">无论如何，估值指标<b>永远不参与</b>信用需給评分。</span></div>';
 
   $('verdictBox').innerHTML =
     '<div class="v3">'+
-      /* 方向 */
+      /* 方向分 */
       '<div class="vbox dirmid">'+
-        '<div class="hd"><span>方向（多空倾向）</span><b style="color:'+v.dirColor+'">'+v.dirLabel+'</b></div>'+
-        '<div><span class="big" style="color:'+v.dirColor+'">'+(v.dir>0?'+':'')+v.dir+'</span>'+
+        '<div class="hd"><span>方向（多空倾向）</span><b style="color:'+a.dirColor+'">'+a.dirLabel+'</b></div>'+
+        '<div><span class="big" style="color:'+a.dirColor+'">'+(a.dir>0?'+':'')+a.dir+'</span>'+
         '<span class="sc">/ 100</span></div>'+
         '<div class="g"><i style="left:calc('+dirPos+'% - 1.5px)"></i></div>'+
-        '<div class="sc2">回答「偏多还是偏空」。与信用风险分开评估。</div>'+
+        '<div class="sc2">回答「偏多还是偏空」。仅由股价×信用買残四象限等信用指标决定。</div>'+
       '</div>'+
-      /* 信用风险 */
+      /* 信用风险分 */
       '<div class="vbox risk">'+
-        '<div class="hd"><span>信用需給リスク</span><b style="color:'+v.riskColor+'">'+v.riskLabel+'</b></div>'+
-        '<div><span class="big" style="color:'+v.riskColor+'">'+v.risk+'</span>'+
+        '<div class="hd"><span>信用需給リスク</span><b style="color:'+a.riskColor+'">'+a.riskLabel+'</b></div>'+
+        '<div><span class="big" style="color:'+a.riskColor+'">'+a.risk+'</span>'+
         '<span class="sc">/ 100</span></div>'+
         '<div class="g"><i style="left:calc('+riskPos+'% - 1.5px)"></i></div>'+
         '<div class="sc2">回答「信用仓位是否紧张」。<b>风险高≠ 股价必跌</b>，两者是不同维度。</div>'+
       '</div>'+
     '</div>'+
     '<div class="vwhy">'+
-      (dItems ? '<div style="font-size:11px;color:var(--sub);margin-bottom:2px">【方向依据】</div>'+dItems : '')+
-      (rItems ? '<div style="font-size:11px;color:var(--sub);margin:6px 0 2px">【风险依据】</div>'+rItems : '')+
-      (!dItems && !rItems ? '<div class="r" style="border-color:var(--sub)">当前无规则触发，信用数据处于中性区间。</div>' : '')+
+      '<div class="whyHd">【方向スコアの入力 — 与 PER/PBR 无关】</div>'+
+      (dItems || '<div class="r" style="border-color:var(--sub)">方向规则未触发。</div>')+
+      '<div class="whyHd" style="margin-top:8px">【信用リスクの入力 — 与 PER/PBR 无关】</div>'+
+      (rItems || '<div class="r" style="border-color:var(--sub)">风险规则未触发。</div>')+
+      '<div class="whyHd" style="margin-top:8px">【除外された估值信号 — 不计入以上任何分数】</div>'+
+      vItems+
     '</div>'+
     '<div class="vfoot">'+
       '<b>方向</b>由「股价 × 信用买残」四象限（当前判定：<span style="color:'+q.color+'">'+q.label+
-      '</span>）与估值水平决定；<b>信用风险</b>由「買残消化日数」「下落中买残增加」'+
+      '</span>）与信用倍率构成决定；<b>信用风险</b>由「買残消化日数」「下落中买残增加」'+
       '「売残激增」等绝对量指标决定。<br>'+
-      '<b>信用风险高，并不等于股价一定下跌</b> —— 例如买残堆积但成交量足以快速消化时，'+
-      '风险分高而方向未必转空；反之売残激增时风险分高且方向偏空。<br>'+
+      '<b>PER / PBR / EPS / BPS / 配当 属于「企業・バリュエーション」，'+
+      '不参与信用需給的等级判定</b> —— 估值高不等于信用需給差。<br>'+
       '<b>本结论仅为数据统计结果，不构成投资建议。</b>'+
     '</div>';
 }
@@ -1414,36 +1578,10 @@ function drawPriceMargin(d){
     ]
   },true);
 
-  // 变化率模式给出可读结论
-  if (isIdx) {
-    const dp = pxI[pxI.length-1] - 100, db = buyI[buyI.length-1] - 100;
-    const diverge = (dp < 0 && db > 0);
-    // 结构化读数：株価 98.1 ↘ / 信用買残 104.6 ↗
-    const arrow = (v) => v > 0.05 ? '↗' : (v < -0.05 ? '↘' : '→');
-    const col   = (v) => v > 0 ? 'var(--sell)' : (v < 0 ? 'var(--buy)' : 'var(--sub)');
-    const cell  = (lbl, v, d) =>
-      '<div class="dcell"><span class="dl">'+lbl+'</span>'+
-      '<span class="dv" style="color:'+col(d)+'">'+v+'</span>'+
-      '<span class="da" style="color:'+col(d)+'">'+arrow(d)+'</span></div>';
-    // 图底只留一句，不再重复顶部结论
-    const note = diverge
-      ? '<div class="deltaNote 逆">↗ 逆行 —— 株価は下落、買残は増加</div>'
-      : (dp > 0 && db < 0
-        ? '<div class="deltaNote" style="color:var(--ok)">↘ 逆行 —— 株価は上昇、買残は減少</div>'
-        : '<div class="deltaNote" style="color:var(--sub)">同方向 —— 株価と買残は同じ向き</div>');
-    $('c4delta').innerHTML =
-      cell('株価', pxI[pxI.length-1], dp) +
-      cell('信用買残', buyI[buyI.length-1], db) + note;
-  } else {
-    const last = rows[rows.length-1];
-    $('c4delta').innerHTML =
-      '<div class="dcell"><span class="dl">株価</span>'+
-        '<span class="dv">'+last.close.toLocaleString()+'</span><span class="da">円</span></div>'+
-      '<div class="dcell"><span class="dl">信用買残</span>'+
-        '<span class="dv">'+wan(last.buy)+'</span><span class="da">万株</span></div>'+
-      '<div class="deltaNote" style="color:var(--sub)">実数表示。'+
-        '「変化率（初日=100）」に切り替えると両者の乖離が視覚的に確認できます。</div>';
-  }
+  // 变化率模式：首页不再输出图下读数。
+  // 理由（信息层级纪律）：同一事实（株価涨跌 / 買残涨跌）在首页只能出现一次，
+  // 它们已由 Hero 下方的 facts 两行给出；图下再重复一遍等于把同一句话说两次。
+  // 需要的读数请在图上用 tooltip 查看，或到「信用残詳細」看日次数据表。
 }
 /* バリュエーション基準価格（横条） */
 function drawTarget(d){

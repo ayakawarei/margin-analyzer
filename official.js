@@ -36,15 +36,21 @@ async function fetchOfficialDaily(code, days = 15, fresh = false) {
   }
 }
 
-/** 探测本地服务是否在线 */
-async function pingLocal() {
+/** 探测本地服务是否在线
+ *  注意：这里只作为「要不要显示提示」的参考，**不作为是否走官方通道的开关**。
+ *  旧实现把 ping 结果缓存进 LOCAL_OK，ping 抖动一次就让整页降级到 Ganan，
+ *  而 Ganan 周次接口常常拿不到数据 → 整页报「信用残数据为空」。
+ *  现在 auto 模式总是先试官方通道，失败才回退（见 index.html 的 run()）。*/
+async function pingLocal(timeoutMs = 6000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 2500);
     const r = await fetch(`${LOCAL_API}/api/health`, { signal: ctrl.signal });
-    return r.ok;
+    return !!r.ok;
   } catch (e) {
     return false;
+  } finally {
+    clearTimeout(t);          // 关键：必须清理，否则定时器会在稍后 abort 已完成的请求
   }
 }
 

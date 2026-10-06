@@ -27,7 +27,7 @@ import gzip
 import datetime
 import urllib.request
 import urllib.error
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
 BASE = "https://www.jpx.co.jp"
@@ -82,20 +82,19 @@ def list_available(limit=15):
 
 
 # ------------------------------------------------- 步骤2：解析单个 PDF
-CODE_RE = re.compile(r"\b(\d{4})[A-Z0-9]?\b")
-
-
 def parse_pdf(code, path):
     """
     从 PDF 中抽出指定代码的一行，返回买卖残、倍率与扩展指标。
 
-    解析要点（每条都对应一个真实踩过的坑）：
+    解析要点（每条对应一个真实踩过的坑）：
       1. 代码必须**精确匹配**代码列，不能用子串 —— `if "3905" in line`
          会命中 ISIN（JP3539050009）与邻近代码，导致串标的。
-      2. 每 3 个数字一组：残高 / 前日比 / 上場比%，残量在百分号**往前第 3 个**。
-      3. 小数百分比须整体匹配，否则 `0.1%` 被拆成 `0` 和 `1`，列位全错。
-      4. 先剥 ISIN 再剥代码，且剥代码只剥一次。
-      5. 每行下方还有英文名行（含同一代码），须过滤。
+      2. 「株数 Shs.」是锚点，其后是固定 14 列数据字段，
+         用**固定列索引**定位（[0]=売残 [3]=買残 [2]/[5]=上場比），
+         不再依赖「百分比往前第 3 个」—— 那样卖残=0 或上場比=* 时会错位。
+      3. 字段正则要能匹配「0」和「*」，且「株数 Shs.」之前的内容（名称/ISIN）
+         全部被截断，故名称里嵌数字（如 ETF「受益証1券」）不会串入。
+      4. ▲ 表示减少（前日比），字段解析时转负号。
     """
     try:
         import pdfplumber
@@ -120,66 +119,52 @@ def parse_pdf(code, path):
                     if not code_re.search(line):
                         continue
 
-                    body = re.sub(r"[A-Z]{2}\d{10,13}", " ", line)
-                    body = code_re.sub(" ", body, count=1)
+                    # ---- 锚点「株数 Shs.」之后 = 固定 14 列数据 ----
+                    m = re.search(r"株数\s*Shs\.\s*(.*)$", line)
+                    if not m:
+                        continue
+                    fields = re.findall(r"\*|▲\s*[\d,]+|[\d,]+(?:\.\d+)?%?", m.group(1))
+                    if len(fields) < 6:
+                        continue
 
-                    raw = re.findall(
-                        r"\d[\d,]*\.\d+%|\d[\d,]*%|[\d,]{3,}", body)
-                    nums = []
-                    for t in raw:
+                    def pf(s):
+                        """解析单个字段：数字/▲数字/百分比/* → 数值或 None"""
+                        if s is None:
+                            return None
+                        s = s.strip()
+                        if s == "*":
+                            return None
+                        neg = s.startswith("▲")
+                        s = s.replace("▲", "").replace("%", "").replace(",", "").strip()
+                        if not s:
+                            return None
                         try:
-                            nums.append((float(t.rstrip("%").replace(",", "")), t.endswith("%")))
+                            v = float(s) if "." in s else int(s)
+                            return -v if neg else v
                         except ValueError:
-                            pass
-                    if len(nums) < 6:
+                            return None
+
+                    short = pf(fields[0]) or 0
+                    long_ = pf(fields[3])
+                    if long_ is None or long_ <= 0:
                         continue
 
-                    pct = [i for i, (_, p) in enumerate(nums) if p]
-                    if len(pct) < 2:
-                        continue
-                    i_short, i_long = pct[0] - 2, pct[1] - 2
-                    if i_short < 0 or i_long < 0:
-                        continue
-
-                    short = int(nums[i_short][0])
-                    long_ = int(nums[i_long][0])
-                    if short <= 0 or long_ <= 0:
-                        continue
-
-                    # ---- 扩展指标：制度/一般信用、貸借比率、上場比 ----
-                    # 每组仍是 3 列：残高 / 前日比 / 上場比%
-                    groups = []
-                    for gi in range(len(pct)):
-                        idx = pct[gi] - 2
-                        if idx < 0:
-                            continue
-                        groups.append({
-                            "bal": int(nums[idx][0]),
-                            "chg": int(nums[idx - 1][0]) if idx - 1 >= 0 else None,
-                            "listed": nums[pct[gi]][0],   # 上場比 %
-                        })
-
-                    neg = groups[2] if len(groups) > 2 else None   # 一般信用
-                    std = groups[3] if len(groups) > 3 else None   # 制度信用
-
-                    # ---- 异常值校验：与「買 ≥ 売」的常理冲突时判为串标的 ----
-                    listed_short = groups[0]["listed"] or 0
-                    listed_long = groups[1]["listed"] or 0
                     rec = {
                         "code": code,
                         "sell": short,
                         "buy": long_,
-                        "ratio": round(long_ / short, 2),
-                        "sellChg": groups[0]["chg"],
-                        "buyChg": groups[1]["chg"],
-                        "sellListed": listed_short,
-                        "buyListed": listed_long,
-                        "negSell": neg["bal"] if neg else None,
-                        "negBuy": neg["bal"] if neg else None,
-                        "stdSell": std["bal"] if std else None,
-                        "stdBuy": std["bal"] if std else None,
+                        "ratio": round(long_ / short, 2) if short > 0 else None,
+                        "sellChg": pf(fields[1]),
+                        "buyChg": pf(fields[4]),
+                        "sellListed": pf(fields[2]),
+                        "buyListed": pf(fields[5]),
+                        # 扩展指标（列 6~13）：一般/制度信用的卖/买残
+                        "negSell": pf(fields[6]) if len(fields) > 6 else None,
+                        "stdSell": pf(fields[8]) if len(fields) > 8 else None,
+                        "negBuy": pf(fields[10]) if len(fields) > 10 else None,
+                        "stdBuy": pf(fields[12]) if len(fields) > 12 else None,
                     }
-                    # 貸借比率（貸株残 / 発行済株式数）：无場比时跳过
+
                     err = validate(rec)
                     if err:
                         print(f"  [skip] {code}: {err}", file=sys.stderr)
@@ -187,10 +172,9 @@ def parse_pdf(code, path):
 
                     # 证券種別写法不统一：
                     #   7974 →「普通株式 プライム」；285A →「普通株プライム」（省略「式」）
-                    #   故两种都要放行。
-                    m = re.search(
+                    m2 = re.search(
                         r"\s([^\s\d][^\d\s]*?)\s+(?:普通株式?|優先株式?)", line)
-                    rec["name"] = m.group(1) if m else None
+                    rec["name"] = m2.group(1) if m2 else None
                     return rec, None
     except Exception as e:  # pragma: no cover
         return None, f"PDF 解析失败: {e}"
@@ -206,8 +190,9 @@ def validate(rec):
     数十倍），两者互相比较没有意义。真正的判据是「残量与上場比是否自洽」。
     """
     sell, buy = rec["sell"], rec["buy"]
-    if sell <= 0 or buy <= 0:
-        return "残量非正"
+    # 卖残=0 合法（无融券余额的 ETF/新股）；只要求买残 > 0
+    if buy <= 0:
+        return "买残非正"
 
     # 1) 買残不应低于売残的 1/100。低于此值在正常市场极罕见
     if buy * 100 < sell:
@@ -316,11 +301,17 @@ class H(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
 
         if u.path in ("/api/health", "/health"):
+            # 纯存活检查：**绝不做网络请求**。
+            # 旧实现在这里调用 list_available()，那会去 JPX 抓索引页，
+            # 于是「健康检查」本身要等外网往返；JPX 慢或正在解析 PDF 时
+            # 前端 pingLocal() 就会超时 → 误判服务不可用 → 整页降级到无数据的
+            # Ganan 源（表现为「信用残数据为空」，如 285A 加载失败）。
+            # 只读本地缓存目录的数量，恒为即时返回。
             try:
-                n = len(list_available(limit=5))
-                self._send({"ok": True, "available": n})
-            except Exception as e:
-                self._send({"ok": False, "err": str(e)}, 500)
+                n = len(glob.glob(os.path.join(CACHE_DIR, "*.pdf")))
+            except Exception:
+                n = 0
+            self._send({"ok": True, "cached_pdfs": n, "net": "not probed"})
             return
 
         if u.path in ("/api/margin", "/margin"):
@@ -379,7 +370,10 @@ def main():
     print(f"  接口  http://127.0.0.1:{port}/api/margin?code=7974&days=20")
     print(f"  健康  http://127.0.0.1:{port}/api/health")
     print("=" * 60)
-    HTTPServer(("127.0.0.1", port), H).serve_forever()
+    # 必须用 ThreadingHTTPServer：单线程 HTTPServer 会被 PDF 解析阻塞整个连接，
+    # 导致前端 pingLocal() 在解析期间超时 → 误判「服务不可用」→ 整页降级到
+    # 无数据的 Ganan 源（表现为「信用残数据为空」，如 285A 加载失败）。
+    ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 
 
 if __name__ == "__main__":

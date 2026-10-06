@@ -145,9 +145,9 @@ function quadrant(rows, span) {
              text: '株価または信用残の推移が短く、四象限を判定できません。' };
   }
 
-  const PD = 0.5, BD = 1.0;   // 判定阈值
-  const pUp = priceChg > PD, pDn = priceChg < -PD;
-  const bUp = buyChg > BD,  bDn = buyChg < -BD;
+  const PD = 0.5, BD = 1.0;   // 判定阈值（接近噪音的变化不算方向）
+  const pUp = priceChg > PD,  pDn = priceChg < -PD,  pFlat = !pUp && !pDn;
+  const bUp = buyChg > BD,    bDn = buyChg < -BD,    bFlat = !bUp && !bDn;
 
   if (pUp && bDn) {
     return { key: 'strong', label: '🟢 強い / 健全', level: 'ok', color: '#22c55e',
@@ -162,12 +162,31 @@ function quadrant(rows, span) {
   if (pDn && bDn) {
     return { key: 'deleverage', label: '🟡 去杠杆', level: 'warn', color: '#f5a524',
              buyChg, priceChg,
-             text: '株価下落と同時に信用整理が進行。売り圧の消化に进展。' };
+             text: '株価下落と同時に信用整理が進行。売り圧の消化が進展。' };
   }
   if (pDn && bUp) {
     return { key: 'accumulateDown', label: '🔴 下落中の買い残増加', level: 'alert', color: '#ff5a6e',
              buyChg, priceChg,
              text: '下落局面で信用買いが増加。ナンピン・信用買い積み上がりの可能性があり、短期需給は悪化。' };
+  }
+  // ---- 显式 neutral zone：股价横ばい时退化为「只看买残方向」 ----
+  // 之前这里统一落 flat（label「两者都横ばい」），会把「股价横盘 + 买残暴增」
+  // 误描述成「两者都横ばい」，丢失买残在动的信息。
+  if (pFlat && bUp) {
+    return { key: 'marginBuildFlat', label: '🟡 買残増加（株価横ばい）', level: 'warn', color: '#f5a524',
+             buyChg, priceChg,
+             text: '株価は横ばいだが信用買い残が増加。方向は未定だが、杠杆买盘在積み上がり。' };
+  }
+  if (pFlat && bDn) {
+    return { key: 'marginDeclineFlat', label: '🟢 買残減少（株価横ばい）', level: 'ok', color: '#22c55e',
+             buyChg, priceChg,
+             text: '株価は横ばいで信用買い残が減少。筹码在温和消化。' };
+  }
+  if (bFlat && (pUp || pDn)) {
+    // 股价动但买残几乎不变：方向由股价自身决定，信用面中性
+    return { key: 'priceMoveOnly', label: '— 買残横ばい', level: 'info', color: '#8b96ad',
+             buyChg, priceChg,
+             text: '株価は' + (pUp ? '上昇' : '下落') + 'したが、信用買い残は横ばい。信用面の変化は小さい。' };
   }
   return { key: 'flat', label: '— 方向性弱', level: 'info', color: '#8b96ad',
            buyChg, priceChg, text: '株価・信用残ともに横ばい。方向性の読み取り材料が不足。' };
@@ -218,7 +237,7 @@ function digestDays(opts) {
     days5: null, avgVolume5: null, level: 'na', label: '—',
     note: '行情データに有効な出来高がありません', cutoff: cutoff,
   };
-  if (marginBuy == null || !barsAll.length || !cutoff) return empty;
+  if (marginBuy == null || marginBuy <= 0 || !barsAll.length || !cutoff) return empty;
 
   // 有效成交量序列：date <= cutoff 且 vol > 0，按日期升序
   const valid = barsAll
@@ -359,6 +378,24 @@ function computeIndicators(rows, val, ctx) {
      两者口径不同，不能混用。此处主口径 = 自己用 val.shares 算「買残 ÷ 発行済株式数」，
      JPX 上場比作为审计对比保留。拿不到発行済株式数时 fallback 到 JPX 上場比并如实标注。 */
   const shares = (val && val.shares > 0) ? val.shares : null;
+
+  // 分母稳定性检测：JPX 上場比反推的「上場株式数」 vs Ganan 発行済株式数。
+  // 若两者乖离 > 20%，说明某一来源可能有时点差（分割/增资/旧财报），
+  // 此时「買残/発行済比」的绝对值不可完全信任，UI 需警示。
+  let denomStable = null, denomNote = null, impliedListed = null;
+  if (shares && last.buyListed != null && last.buyListed >= 1) {
+    // 上場比 >= 1% 才反推；太小时（如 0.1%）四舍五入误差巨大，反推不可靠
+    impliedListed = last.buy / (last.buyListed / 100);
+    const diff = (impliedListed - shares) / shares * 100;
+    denomStable = Math.abs(diff) <= 20;
+    if (!denomStable) {
+      denomNote = `発行済株式数（${shares.toLocaleString()}）と JPX 上場比反推値（${Math.round(impliedListed).toLocaleString()}）が ${diff >= 0 ? '+' : ''}${diff.toFixed(0)}% 乖離。分割・増資・旧データの可能性があり、「買残/発行済比」の絶対値は参考値です。`;
+    }
+  } else if (shares && last.buyListed != null && last.buyListed < 1) {
+    denomStable = null;
+    denomNote = '上場比が 1% 未満のため、反推による分母安定性は判定できません。';
+  }
+
   R.borrowRate = {
     // 分母（発行済株式数，来自 Ganan）
     shares: shares,
@@ -371,6 +408,10 @@ function computeIndicators(rows, val, ctx) {
     // 审计：JPX 原始上場比（分母=上場株式数），供对比
     buyListedJpx: last.buyListed ?? null,
     sellListedJpx: last.sellListed ?? null,
+    // 分母稳定性
+    denomStable: denomStable,
+    denomNote: denomNote,
+    impliedListedShares: impliedListed ? Math.round(impliedListed) : null,
     daysToCover: null,
     note: shares ? null : '発行済株式数未取得，fallback 到 JPX 上場比（分母=上場株式数）',
   };
@@ -520,7 +561,7 @@ function detectAnomalies(rows, ind, val) {
   if (ind && ind.borrowRate && !ind.borrowRate.bpsVerified) {
     push('note', 'info', 'PBR はデータ未検証',
       'BPS が财报実値（API 由来）を得ていないため、PBR 基準価格と PBR 区间は算出していません。' +
-      '「現値 ÷ サイトPBR」からの逆算は時点ずれを含み、誤差 inflicted のため採用しません。');
+      '「現値 ÷ サイトPBR」からの逆算は時点ずれを含むため採用しません。');
   }
 
   return out;
@@ -532,6 +573,19 @@ function detectAnomalies(rows, ind, val) {
  *  Risk（信用风险 0~100）：只回答「信用需給是否紧张」，不预测涨跌。
  *  Dir（方向 -100~+100）：回答多空倾向。
  *  「信用风险高」≠「股价一定跌」，故两者必须分开显示。
+ *
+ * ★ 作用域铁律（2026-10-06）
+ * -------------------------------------------------------------------------
+ * 信用需給评分**只允许**使用信用交易自身的指标：
+ *   株価×信用買残方向 · 信用買残变化 · 信用売残变化 · 買残消化日数
+ *   買残/発行済比 · 信用倍率 · 信用需給リスク
+ *
+ * PER / PBR / EPS / BPS / 配当 / 估值区间 属于「企業・バリュエーション」，
+ * **一律不得进入 DIR_RULES 或 RISK_RULES**。
+ * 反例（已修正）：曾有 `per-high w:12 zone:'dn'` —— 「PER 35倍，估值不便宜」
+ * 会把信用筹码完全健康、但估值偏高的股票判成「短期信用需給：弱気」。
+ * 这是概念混淆：估值高低不改变信用需給的好坏，两者必须完全解耦。
+ * 保留在 VALUATION_SIGNALS 里仅供详细页展示，不参与任何评分。
  * ========================================================================= */
 
 const RISK_RULES = [
@@ -541,9 +595,10 @@ const RISK_RULES = [
   { id: 'digest-high', w: 18,
     test: (i) => i.digest.days != null && i.digest.days >= 3 && i.digest.days < 5,
     why: (i) => `買残消化日数 ${i.digest.days} 日（3~5日），仓位偏重。` },
-  { id: 'digest-normal', w: 10,
-    test: (i) => i.digest.days != null && i.digest.days < 1,
-    why: (i) => `買残消化日数 ${i.digest.days} 日（<1日），以成交量看买盘并不重。` },
+  // 注意：这里**不再**有「digest < 1 日」的风险规则。
+  // 曾有一条 `digest-normal w:10`（消化 <1 日），但它是在 RISK_RULES（纯加分）里
+  // 给「仓位轻」加分，方向完全反了 —— 会让 0.3 日、0.68 日这种轻仓股票
+  // 无辜 +10 风险分，系统性高估低仓位股票的风险。已删除。
   { id: 'down-accum', w: 28,
     test: (i) => i.quadrant.key === 'accumulateDown',
     why: (i) => `股价 ${i.quadrant.priceChg}% 与買残 ${i.quadrant.buyChg}% 反向，处于「下落中的信用買い增加」。` },
@@ -580,12 +635,21 @@ const DIR_RULES = [
   { id: 'short-squeeze', w: 26, zone: 'up',
     test: (i) => i.ratioDecomp.cause === 'shortTiny' && i.ratio.value != null && i.ratio.value >= 8,
     why: (i) => `倍率 ${i.ratio.value}倍 主要来自「売残极少」而非買残堆积，軋空（ショートカバー）余力相对存在。` },
-  { id: 'per-high', w: 12, zone: 'dn',
+  // ⚠ 这里**刻意没有** per-high（PER）与 div-good（配当利回り）。
+  // 两者都是「企業・バリュエーション」维度，混进信用需給评分会造成概念混淆：
+  // 「信用筹码健康 + 估值偏高」不应该被表述为「短期需給弱気」。
+  // 已移至 VALUATION_SIGNALS（仅展示，不计分）。
+];
+
+/* 估值侧信号 —— **不参与任何信用需給评分**，仅在详细页作为
+   「企業・バリュエーション 与信用需給是两套独立判断」的说明材料展示。*/
+const VALUATION_SIGNALS = [
+  { id: 'per-high', label: 'PER 偏高',
     test: (i) => i.per.now != null && i.per.now >= 25,
-    why: (i) => `PER ${i.per.now}倍，估值不便宜。` },
-  { id: 'div-good', w: 10, zone: 'up',
+    text: (i) => `PER ${i.per.now}倍 —— 属估值判断，与信用需給无关。` },
+  { id: 'div-good', label: '配当利回り良好',
     test: (i) => i.dividend.yield != null && i.dividend.yield >= 3,
-    why: (i) => `予想配当利回り ${i.dividend.yield}%，股息支撑较强。` },
+    text: (i) => `予想配当利回り ${i.dividend.yield}% —— 属估值判断，与信用需給无关。` },
 ];
 
 function runRules(ind, val) {
@@ -626,8 +690,112 @@ function runRules(ind, val) {
   };
 }
 
+/* =========================================================================
+ * 7. 信用需給 最終等级 —— 首页唯一展示的结论
+ * -------------------------------------------------------------------------
+ * 设计约束（用户 2026-10-06 明确要求）：
+ *  · 首页**只给等级**，不暴露 0~100 内部分数（分数是模型参数，不是用户语言）
+ *  · 等级只由信用需給自身指标决定，估值（PER/PBR/配当）不参与
+ *  · 「信用ポジション」用 軽い/普通/重い 三档表达仓位轻重，同样不给数字
+ *
+ * 定级原则：红色只留给「绝对量真的重」或「下落中买残增加且仓位不轻」，
+ * 否则会出现「🔴 悪化」却同时三个绿色 KPI 的自相矛盾。
+ * ========================================================================= */
+const GRADES = {
+  good: { key: 'good', emoji: '🟢', label: '改善', color: '#22c55e', bg: 'rgba(34,197,94,.12)' },
+  mid:  { key: 'mid',  emoji: '🟡', label: '中立', color: '#fbbf24', bg: 'rgba(251,191,36,.12)' },
+  warn: { key: 'warn', emoji: '🟠', label: '注意', color: '#f5a524', bg: 'rgba(245,165,36,.12)' },
+  bad:  { key: 'bad',  emoji: '🔴', label: '悪化', color: '#ff5a6e', bg: 'rgba(255,90,110,.12)' },
+};
+
+/**
+ * 信用ポジション（仓位轻重）—— 三档，不给数字
+ * 以「買残消化日数」为主尺度（相对成交量），買残/発行済比 为辅助。
+ */
+function creditPosition(ind) {
+  const dg = ind.digest, bl = ind.borrowRate;
+  const d = dg && dg.days != null ? dg.days : null;
+  const p = bl && bl.buyListed != null ? bl.buyListed : null;
+
+  let key, label, color;
+  if ((d != null && d >= 3) || (p != null && p >= 10))      { key='heavy'; label='重い';   color='#ff5a6e'; }
+  else if ((d != null && d >= 1) || (p != null && p >= 3))  { key='normal';label='普通';   color='#f5a524'; }
+  else                                                        { key='light'; label='軽い';   color='#22c55e'; }
+
+  const basis = [];
+  if (d != null) basis.push('消化日数 ' + d.toFixed(2) + '日');
+  if (p != null) basis.push('発行済比 ' + p.toFixed(2) + '%');
+  return { key, label, color, basis: basis.join(' / ') || '—' };
+}
+
+/**
+ * 信用需給 最終等级
+ * @param ind   computeIndicators 的结果
+ * @param vr    runRules 的结果（只用 dir / risk 两个内部量做阈值判定，不对外展示）
+ */
+function creditVerdict(ind, vr) {
+  const dir = vr.dir, risk = vr.risk;
+  const dg = ind.digest, q = ind.quadrant;
+  const bl = ind.borrowRate;
+
+  // 绝对量是否真的重 —— 只看消化日数（仓位 vs 成交量）
+  const absHeavy = (dg.days != null && dg.days >= 3);
+  const absLight = (dg.days != null && dg.days < 1.5);
+  // 追高型：仓位不重但短期买残暴涨
+  const surging  = (ind.long.chgN != null && ind.long.chgN > 100) && absLight;
+  const listedHeavy = (bl.buyListed != null && bl.buyListed >= 10);
+
+  let g;
+  if (absHeavy)                                   g = GRADES.bad;
+  else if (q.key === 'accumulateDown' && !absLight) g = GRADES.bad;
+  else if (listedHeavy && q.key !== 'strong')      g = GRADES.bad;
+  else if (surging || dir < -20 || risk >= 55)     g = GRADES.warn;
+  else if (dir >= 10 && risk < 45 && !absHeavy)    g = GRADES.good;
+  else                                             g = GRADES.mid;
+
+  return {
+    grade: g.key,
+    emoji: g.emoji,
+    label: g.label,
+    color: g.color,
+    bg: g.bg,
+    // 首页只展示这一行；suffix 用于说明「为什么是这个等级」的一句话提示
+    badge: g.emoji + ' 短期信用需給：' + g.label,
+    suffix: absHeavy ? '（買残の消化に ' + dg.days.toFixed(1) + '日）'
+              : surging ? '（買残の急騰）'
+              : (risk >= 55 ? '（信用需給が偏重）' : ''),
+    position: creditPosition(ind),
+  };
+}
+
+/* =========================================================================
+ * 8. 内部评分的对外暴露面（详细页「判定ロジック」专用）
+ * -------------------------------------------------------------------------
+ * 首页不调用这里。仅当用户对结论有疑问、需要审计时才展开。
+ * ========================================================================= */
+function verdictAudit(ind, vr, val) {
+  const rItems = vr.riskHits.map(function (h) {
+    return { id: h.id, w: h.w, text: h.whyText };
+  });
+  const dItems = vr.dirHits.map(function (h) {
+    return { id: h.id, w: (h.zone === 'up' ? h.w : -h.w), zone: h.zone, text: h.whyText };
+  });
+  const valHits = VALUATION_SIGNALS.filter(function (s) {
+    try { return !!s.test(ind, val); } catch (e) { return false; }
+  }).map(function (s) { return { id: s.id, label: s.label, text: s.text(ind) }; });
+
+  return {
+    dir: vr.dir, dirLabel: vr.dirLabel, dirColor: vr.dirColor,
+    risk: vr.risk, riskLabel: vr.riskLabel, riskColor: vr.riskColor,
+    dirItems: dItems, riskItems: rItems, valuationExcluded: valHits,
+    quadrant: ind.quadrant,
+  };
+}
+
 window.MA2 = {
   computeIndicators, detectAnomalies, runRules,
   decomposeRatio, quadrant, digestDays, absoluteRatioLevel,
+  creditVerdict, creditPosition, verdictAudit,
   stat, chg, ma, slope, sd, pctPos, toWan,
+  RISK_RULES, DIR_RULES, VALUATION_SIGNALS, GRADES,
 };
