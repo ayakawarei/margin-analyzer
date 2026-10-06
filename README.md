@@ -8,7 +8,7 @@
 
 ```text
 请帮我在本机安装并启动日股信用残分析工具：
-https://github.com/xiejiatao369/margin-analyzer
+https://github.com/tuffy-xie/margin-analyzer
 
 请实际执行安装，不要只给我命令：
 1. 先确认操作系统、Git 和 Python 环境，阅读仓库 README 与启动脚本。
@@ -159,7 +159,7 @@ index.html + 四个本地 JS ── build.py ── 日股信用残分析.html
 ### 推荐：本地服务
 
 ```bash
-git clone https://github.com/xiejiatao369/margin-analyzer.git
+git clone https://github.com/tuffy-xie/margin-analyzer.git
 cd margin-analyzer
 python3 -m venv .venv
 ./.venv/bin/python3 -m pip install -r requirements.txt
