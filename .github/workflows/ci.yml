@@ -4,6 +4,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -40,6 +41,7 @@ jobs:
           python test_cache_concurrency.py
           python test_refresh_round.py
           python -m unittest -v test_bind_host.py
+          python -m unittest -v test_release.py
       # test_parse.py needs an undistributed market PDF; verify_ui.py needs
       # Playwright and live market sources. Neither is a deterministic CI check.
   docker:
