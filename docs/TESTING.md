@@ -18,6 +18,7 @@ node test_correctness.mjs
 python3 test_parse.py
 python3 test_cache_concurrency.py
 python3 test_refresh_round.py
+python3 -m unittest -v test_history.py  # 历史候选、交易日、网络/缓存及 API 离线回归
 python3 verify_ui.py      # 浏览器验收，失败时返回非 0
 ```
 
