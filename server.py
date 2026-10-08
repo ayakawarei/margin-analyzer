@@ -799,15 +799,16 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8848
+    host = os.environ.get("MARGIN_BIND_HOST", "127.0.0.1")
     print("=" * 60)
     print("日股信用残本地服务已启动")
-    print(f"  接口  http://127.0.0.1:{port}/api/margin?code=7974&days=20")
-    print(f"  健康  http://127.0.0.1:{port}/api/health")
+    print(f"  接口  http://{host}:{port}/api/margin?code=7974&days=20")
+    print(f"  健康  http://{host}:{port}/api/health")
     print("=" * 60)
     # 必须用 ThreadingHTTPServer：单线程 HTTPServer 会被 PDF 解析阻塞整个连接，
     # 导致前端 pingLocal() 在解析期间超时 → 误判「服务不可用」→ 整页降级到
     # 无数据的 Ganan 源（表现为「信用残数据为空」，如 285A 加载失败）。
-    ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+    ThreadingHTTPServer((host, port), H).serve_forever()
 
 
 if __name__ == "__main__":

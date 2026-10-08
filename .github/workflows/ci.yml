@@ -1,0 +1,63 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Python dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip check
+      - name: Verify committed bundle and regenerate
+        run: |
+          python build.py --check
+          python build.py
+          python build.py --check
+          git diff --exit-code -- '日股信用残分析.html'
+      - name: JavaScript regressions
+        run: |
+          set -euo pipefail
+          for test in test_ratio.mjs test_audit.mjs test_digest.mjs test_audit2.mjs test_layer.mjs test_correctness.mjs; do
+            node "$test"
+          done
+      - name: Python regressions
+        run: |
+          python test_cache_concurrency.py
+          python test_refresh_round.py
+          python -m unittest -v test_bind_host.py
+      # test_parse.py needs an undistributed market PDF; verify_ui.py needs
+      # Playwright and live market sources. Neither is a deterministic CI check.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build linux/amd64 image
+        run: docker buildx build --platform linux/amd64 --load -t margin-analyzer:ci .
+      - name: Container HTTP smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name margin-ci -p 127.0.0.1:8849:8848 margin-analyzer:ci
+          trap 'docker logs margin-ci; docker rm -f margin-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8849/api/health > /tmp/health.json; then break; fi
+            sleep 1
+          done
+          python3 -c "import json; assert json.load(open('/tmp/health.json'))['ok'] is True"
+          curl --fail --silent http://127.0.0.1:8849/ > /tmp/page.html
+          python3 -c "from pathlib import Path; assert '<html' in Path('/tmp/page.html').read_text().lower()"
