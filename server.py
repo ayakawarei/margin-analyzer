@@ -33,6 +33,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urljoin
 
 BASE = "https://www.jpx.co.jp"
 INDEX = BASE + "/markets/statistics-equities/margin/01.html"
@@ -48,6 +49,20 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # parserVersion：解析逻辑变更时必须 +1，否则旧的 JSON 缓存会被继续沿用。
 PARSER_VERSION = 4
 SCHEMA_VERSION = 1
+
+# NAS budget: serialize network transfers and expensive PDF parsing globally.
+NETWORK_INTERVAL = 1.0
+NETWORK_TIMEOUT = 20
+MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+_network_lock = threading.Lock()
+_network_last = 0.0
+_network_backoff_until = 0.0
+_parse_slots = threading.Semaphore(1)
+HISTORY_START = datetime.date(2026, 9, 28)  # daily all-issue series; never mix weekly files
+HISTORY_LOOKBACK = 90
+HISTORY_BUDGET = 45.0
+MISSING_TTL = 6 * 3600
+_history_lock = threading.Lock()
 
 # 每个日期一把锁：同一日期的 PDF 只允许一个线程下载/解析，
 # 其余线程等待后直接复用结果（issue 7：半写文件被并发读取）。
@@ -68,10 +83,14 @@ def day_lock(day):
 # 进程内缓存： (code:days) -> 数据；另有 generation 防止旧请求覆盖新缓存
 MEM = {}
 MEM_GUARD = threading.Lock()
+MEM_TS = {}
 
 
 def mem_get(key):
     with MEM_GUARD:
+        if key in MEM_TS and time.monotonic() - MEM_TS[key] >= UPSTREAM_TTL_WARM:
+            MEM.pop(key, None)
+            MEM_TS.pop(key, None)
         return MEM.get(key)
 
 
@@ -87,6 +106,7 @@ def mem_set(key, rows, generation=None):
         if generation is not None and cur is not None and generation < cur:
             return False        # 旧请求，放弃写入
         MEM[key] = rows
+        MEM_TS[key] = time.monotonic()
         if generation is not None:
             MEM_META[key] = generation
         return True
@@ -276,14 +296,37 @@ def pdf_is_complete(path):
 
 
 # ---------------------------------------------------------------- 工具
-def http_get(url, timeout=45, binary=False):
+def http_get(url, timeout=NETWORK_TIMEOUT, binary=False):
+    """Rate-limited, bounded transfers; one retry only for transient failures."""
+    global _network_last, _network_backoff_until
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "*/*",
         "Accept-Language": "ja,en;q=0.9",
     })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = r.read()
+    for attempt in range(2):
+        try:
+            with _network_lock:
+                if time.monotonic() < _network_backoff_until:
+                    raise urllib.error.URLError('JPX transient failure cooldown')
+                time.sleep(max(0.0, NETWORK_INTERVAL - (time.monotonic() - _network_last)))
+                try:
+                    with urllib.request.urlopen(req, timeout=min(timeout, NETWORK_TIMEOUT)) as r:
+                        data = r.read(MAX_DOWNLOAD_BYTES + 1)
+                    if len(data) > MAX_DOWNLOAD_BYTES:
+                        raise ValueError('JPX response exceeds download size limit')
+                finally:
+                    _network_last = time.monotonic()
+            break
+        except (urllib.error.URLError, TimeoutError) as error:
+            if time.monotonic() < _network_backoff_until:
+                raise
+            if isinstance(error, urllib.error.HTTPError) and error.code not in (429, 500, 502, 503, 504):
+                raise
+            if attempt:
+                _network_backoff_until = time.monotonic() + 60.0
+                raise
+            time.sleep(1.0)
     return data if binary else data.decode("utf-8", "ignore")
 
 
@@ -307,9 +350,44 @@ def list_available(limit=15):
         if day in seen:
             continue
         seen.add(day)
-        out.append((day, BASE + href if href.startswith("/") else href))
+        url = urljoin(INDEX, href)
+        if urlparse(url).scheme == 'https' and urlparse(url).hostname == 'www.jpx.co.jp':
+            out.append((day, url))
     out.sort(reverse=True)
     return out[:limit]
+
+
+def history_candidates(avail):
+    """Only derive candidates from an observed official daily PDF directory.
+
+    Candidates are NOT available dates: ensure_pdf must validate each response.
+    Cached PDFs survive index rotation and are usable even when JPX is offline.
+    """
+    known = dict(avail)
+    for path in glob.glob(os.path.join(CACHE_DIR, '*_mtall.pdf')):
+        day = os.path.basename(path).split('_')[0]
+        if re.fullmatch(r'\d{8}', day) and day >= ymd(HISTORY_START) and pdf_is_complete(path)[0]:
+            known.setdefault(day, None)
+    official = [(day, url) for day, url in avail if url and re.fullmatch(
+        r'https://www\.jpx\.co\.jp/markets/statistics-equities/margin/[^/]+/\d{8}_mtall\.pdf', url)]
+    if not official:
+        yield from sorted(known.items(), reverse=True)
+        return
+    latest, sample = max(official)
+    try:
+        anchor = datetime.datetime.strptime(latest, '%Y%m%d').date()
+    except ValueError:
+        yield from sorted(known.items(), reverse=True)
+        return
+    directory = sample.rsplit('/', 1)[0]
+    cutoff = max(HISTORY_START, anchor - datetime.timedelta(days=HISTORY_LOOKBACK))
+    day = anchor
+    while day >= cutoff:
+        stamp = ymd(day)
+        if day.weekday() < 5 and stamp not in known:
+            known[stamp] = directory + '/' + stamp + '_mtall.pdf'
+        day -= datetime.timedelta(days=1)
+    yield from sorted(known.items(), reverse=True)
 
 
 # ------------------------------------------------- 步骤2：解析单个 PDF
@@ -475,7 +553,26 @@ def ensure_pdf(day, url):
             except OSError:
                 pass
 
-        data = http_get(url, timeout=90, binary=True)
+        if not url:
+            raise ValueError('Cached PDF is no longer complete; no verified source URL')
+        missing = os.path.join(CACHE_DIR, f'.missing_{day}.json')
+        previous = {}
+        try:
+            with open(missing, encoding='utf-8') as f:
+                previous = json.load(f)
+            if not isinstance(previous, dict):
+                previous = {}
+        except (OSError, ValueError, KeyError):
+            pass
+        stamp = previous.get('ts', 0)
+        if previous.get('url') == url and isinstance(stamp, (int, float)) and 0 <= time.time() - stamp < MISSING_TTL:
+            raise urllib.error.HTTPError(url, 404, 'Cached missing JPX PDF', None, None)
+        try:
+            data = http_get(url, binary=True)
+        except urllib.error.HTTPError as error:
+            if error.code in (404, 410):
+                atomic_write(missing, json.dumps({'url': url, 'ts': time.time()}))
+            raise
         # 先校验再落盘：坏内容不写正式文件
         fd, tmp = tempfile.mkstemp(dir=CACHE_DIR, prefix=".tmp_pdf_", suffix=".part")
         os.close(fd)
@@ -588,7 +685,8 @@ def fetch_one_day(code, day, url, fresh=False):
             except Exception:
                 pass
 
-        rec, err = parse_pdf(code, ppath)
+        with _parse_slots:
+            rec, err = parse_pdf(code, ppath)
         UPSTREAM_STATS["parses"] += 1   # 真正的昂贵动作：解析 PDF
         if not rec:
             # 解析失败 / 该 PDF 里没有此代码 → 不写缓存（下次可重试）
@@ -621,11 +719,11 @@ def fetch_one_day(code, day, url, fresh=False):
 
 def gather(code, days=20, fresh=False):
     """
-    抓最近 days 个公表日的信用残，按日期升序返回。返回 (rows, upstream_meta)。
+    抓最多 days 个有效公表日的信用残，按日期升序返回。返回 (rows, upstream_meta)。
 
     fresh=True 时跳过进程缓存并重新扫描 JPX 索引页。
     重要：JPX 每日 16:00 才更新，若在 16:00 之后需要新数据，必须
-    传 fresh=True（或重启服务），否则会一直拿到旧缓存。
+    传 fresh=True；普通进程缓存最多复用 10 分钟。
 
     ★ issue 7：refresh 与普通请求并行时，旧请求不得覆盖新缓存
       —— 用 generation 单调标记，mem_set 会拒绝更旧的写入。
@@ -641,16 +739,34 @@ def gather(code, days=20, fresh=False):
         if hit is not None:
             return hit, None          # 进程缓存命中：零上游开销
 
-    avail, up = upstream_index(fresh=fresh, limit=max(days, 12))
+    avail, up = upstream_index(fresh=fresh, limit=UPSTREAM_LIMIT)
     rows = []
-    for day, url in avail:
-        if len(rows) >= days:
-            break
-        r = fetch_one_day(code, day, url, fresh=fresh)
-        if r and r.get("buy", 0) > 0:
-            rows.append(r)
+    # Serialize history walks across HTTP requests; cache is rechecked per PDF.
+    with _history_lock:
+        probe_spent = 0.0
+        indexed_days = {day for day, _ in avail}
+        for day, url in history_candidates(avail):
+            if len(rows) >= days:
+                break
+            is_known = day in indexed_days or pdf_is_complete(
+                os.path.join(CACHE_DIR, f'{day}_mtall.pdf'))[0]
+            if not is_known:
+                if up.get('stale') or probe_spent >= HISTORY_BUDGET:
+                    continue
+                started = time.monotonic()
+                try:
+                    ensure_pdf(day, url)
+                except Exception as error:
+                    print(f'  [history] {day}: {error}', file=sys.stderr)
+                    continue
+                finally:
+                    probe_spent += time.monotonic() - started
+            r = fetch_one_day(code, day, url, fresh=fresh)
+            if r and r.get("buy", 0) > 0:
+                rows.append(r)
 
     rows.sort(key=lambda x: x["date"])
+    rows = rows[-days:]
 
     # 只有拿到数据才写进程缓存；空结果不入 MEM（下次会重试）
     if rows:
