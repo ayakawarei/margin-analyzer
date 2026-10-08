@@ -11,6 +11,9 @@
 docker build --platform linux/amd64 -t margin-analyzer:local .
 ```
 
+使用可信 HTTPS 代理的构建环境可通过 `--secret id=build_ca,src=/path/to/ca-bundle.crt`
+提供其可信 CA；证书仅在安装依赖时挂载，不写入最终镜像，TLS 验证保持开启。
+
 开发验证使用未来测试端口 8849：
 
 ```bash

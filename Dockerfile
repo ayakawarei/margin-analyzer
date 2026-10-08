@@ -5,7 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MARGIN_BIND_HOST=0.0.0.0
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN --mount=type=secret,id=build_ca \
+    if [ -f /run/secrets/build_ca ]; then export PIP_CERT=/run/secrets/build_ca; fi; \
+    pip install --no-cache-dir -r requirements.txt \
     && pip check
 COPY server.py build.py index.html engine.js engine2.js official.js echarts.min.js ./
 COPY licenses/ ./licenses/
